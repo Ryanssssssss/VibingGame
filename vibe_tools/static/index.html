@@ -1,0 +1,2228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GodotVibe - AI Game Creator</title>
+<style>
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f7;
+  --bg-tertiary: #e8e8ed;
+  --bg-hover: #dddde1;
+  --bg-glass: rgba(255,255,255,0.72);
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.12);
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-muted: #aeaeb2;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-light: rgba(0,113,227,0.08);
+  --accent-dark: rgba(0,113,227,0.12);
+  --success: #34c759;
+  --success-light: rgba(52,199,89,0.1);
+  --warning: #ff9f0a;
+  --error: #ff3b30;
+  --error-light: rgba(255,59,48,0.08);
+  --code-bg: #1d1d1f;
+  --code-text: #f5f5f7;
+  --scrollbar: rgba(0,0,0,0.15);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow: 0 4px 20px rgba(0,0,0,0.08);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.12);
+  --shadow-card: 0 2px 12px rgba(0,0,0,0.06);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --radius-xs: 6px;
+  --transition: 0.25s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Noto Sans SC', Arial, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+
+/* ══════ HOME VIEW (project list) ══════ */
+#homeView {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: linear-gradient(180deg, #fbfbfd 0%, #f5f5f7 100%);
+}
+
+.home-header {
+  background: var(--bg-glass);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+  height: 52px;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.home-header .logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+}
+
+.home-header .logo svg { width: 28px; height: 28px; }
+
+.home-header .status-bar {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 500;
+}
+
+.status-dot::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: var(--transition);
+}
+
+.status-dot.active::before { background: var(--success); box-shadow: 0 0 6px rgba(52,199,89,0.4); }
+
+.home-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 48px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.home-hero {
+  text-align: center;
+  margin-bottom: 40px;
+  max-width: 600px;
+}
+
+.home-hero h1 {
+  font-size: 48px;
+  font-weight: 700;
+  letter-spacing: -1.5px;
+  background: linear-gradient(135deg, #1d1d1f 0%, #6e6e73 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 12px;
+  line-height: 1.1;
+}
+
+.home-hero p {
+  color: var(--text-secondary);
+  font-size: 17px;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+.home-actions {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 44px;
+}
+
+.btn {
+  padding: 10px 22px;
+  border-radius: 980px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: -0.1px;
+}
+
+.btn-accent {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 2px 8px rgba(0,113,227,0.2);
+}
+
+.btn-accent:hover { background: var(--accent-hover); box-shadow: 0 4px 14px rgba(0,113,227,0.3); transform: scale(1.02); }
+
+.btn-secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-secondary:hover { background: var(--bg-hover); transform: scale(1.02); }
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  width: 100%;
+  max-width: 960px;
+}
+
+.project-tile {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+  cursor: pointer;
+  transition: var(--transition);
+  position: relative;
+  box-shadow: var(--shadow-card);
+}
+
+.project-tile:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--border-strong);
+}
+
+.project-tile .tile-name {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: -0.2px;
+}
+
+.project-tile .tile-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  font-weight: 400;
+}
+
+.project-tile .tile-badges {
+  display: flex;
+  gap: 6px;
+}
+
+.badge {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 980px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.badge-mem { background: var(--success-light); color: #248a3d; }
+.badge-assets { background: var(--accent-light); color: var(--accent); }
+.badge-chat { background: rgba(175,82,222,0.1); color: #af52de; }
+
+.project-tile .tile-actions {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: var(--transition);
+}
+
+.project-tile:hover .tile-actions { opacity: 1; }
+
+.tile-actions button {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 11px;
+  transition: var(--transition);
+  font-weight: 500;
+}
+
+.tile-actions button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.tile-actions button.del:hover { background: var(--error-light); color: var(--error); border-color: rgba(255,59,48,0.2); }
+
+/* ══════ PROJECT VIEW (workspace) ══════ */
+#projectView {
+  display: none;
+  grid-template-columns: 260px 1fr 340px;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+}
+
+#projectView.active {
+  display: grid;
+}
+
+/* Project Header */
+.proj-header {
+  grid-column: 1 / -1;
+  background: var(--bg-glass);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+}
+
+.proj-header .back-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 4px 8px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 13px;
+  transition: var(--transition);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+}
+
+.proj-header .back-btn:hover { background: var(--accent-light); }
+
+.proj-header .proj-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+}
+
+.proj-header .proj-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-header .proj-header-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.proj-header .proj-header-actions button {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 5px 12px;
+  border-radius: 980px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.proj-header .proj-header-actions button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.proj-header .proj-header-actions button.run-btn { background: var(--success); border-color: var(--success); color: white; box-shadow: 0 1px 4px rgba(52,199,89,0.25); }
+.proj-header .proj-header-actions button.run-btn:hover { opacity: 0.9; }
+
+/* Left sidebar (files + assets) */
+.proj-sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+}
+
+.sidebar-tab {
+  flex: 1;
+  padding: 10px 4px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: var(--transition);
+  letter-spacing: -0.1px;
+}
+
+.sidebar-tab:hover { color: var(--text-secondary); }
+.sidebar-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.sidebar-panel {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.sidebar-panel.hidden { display: none; }
+
+/* File tree */
+.file-tree .file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: 13px;
+  transition: var(--transition);
+  font-weight: 400;
+}
+
+.file-tree .file-item:hover { background: rgba(0,0,0,0.04); }
+.file-tree .file-item.active { background: var(--accent-light); color: var(--accent); }
+
+.file-tree .file-item .icon {
+  font-size: 14px;
+  width: 18px;
+  text-align: center;
+}
+
+/* Asset section */
+.asset-upload-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 18px;
+  text-align: center;
+  cursor: pointer;
+  transition: var(--transition);
+  margin-bottom: 10px;
+  background: var(--bg-primary);
+}
+
+.asset-upload-zone:hover { border-color: var(--accent); background: var(--accent-light); }
+
+.asset-upload-zone .icon { font-size: 24px; margin-bottom: 4px; }
+.asset-upload-zone .title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.asset-upload-zone .hint { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+/* Main chat area */
+.proj-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.chat-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.chat-welcome {
+  max-width: 560px;
+  margin: auto;
+  text-align: center;
+  padding: 40px 24px;
+}
+
+.chat-welcome h2 {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
+}
+
+.chat-welcome p {
+  color: var(--text-secondary);
+  font-size: 15px;
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.quick-prompts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.quick-prompt {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition);
+  box-shadow: var(--shadow-sm);
+}
+
+.quick-prompt:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: var(--shadow); }
+.quick-prompt .label { font-size: 13px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.1px; }
+.quick-prompt .hint { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+/* Messages */
+.message {
+  display: flex;
+  gap: 10px;
+  max-width: 800px;
+  animation: fadeIn 0.35s cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user { align-self: flex-end; flex-direction: row-reverse; }
+.message.assistant { align-self: flex-start; }
+
+.message .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.message.user .avatar { background: var(--accent); color: white; }
+.message.assistant .avatar { background: linear-gradient(135deg, #af52de, #5856d6); color: white; }
+
+.message .content {
+  padding: 12px 16px;
+  border-radius: 18px;
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 100%;
+  word-break: break-word;
+}
+
+.message.user .content {
+  background: var(--accent);
+  color: white;
+  border-bottom-right-radius: 6px;
+}
+
+.message.assistant .content {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 6px;
+  color: var(--text-primary);
+}
+
+.message .content pre {
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin: 10px 0;
+  overflow-x: auto;
+  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.message .content code {
+  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  background: rgba(0,0,0,0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.message.user .content code { background: rgba(255,255,255,0.2); }
+.message .content pre code { background: none; padding: 0; }
+
+/* Project card */
+.project-card {
+  background: var(--bg-primary);
+  border: 1px solid rgba(52,199,89,0.3);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-top: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.project-card h4 {
+  color: #248a3d;
+  font-size: 14px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.project-card .meta { font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; }
+
+.project-card .actions { display: flex; gap: 8px; }
+
+.project-card .actions button {
+  padding: 6px 14px;
+  border-radius: 980px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: var(--transition);
+  font-weight: 500;
+}
+
+.project-card .actions button:hover { background: var(--bg-tertiary); }
+.project-card .actions button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+
+/* Typing indicator */
+.typing { display: flex; gap: 5px; padding: 4px 0; }
+
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: bounce 1.4s infinite;
+}
+
+.typing span:nth-child(2) { animation-delay: 0.2s; }
+.typing span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-6px); }
+}
+
+/* Input area */
+.input-area {
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.asset-preview-bar {
+  display: none;
+  gap: 8px;
+  padding: 6px 0;
+  max-width: 800px;
+  margin: 0 auto;
+  overflow-x: auto;
+  align-items: center;
+}
+
+.asset-preview-bar.visible { display: flex; }
+
+.asset-preview-bar .label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.asset-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: 980px;
+  padding: 3px 10px 3px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  max-width: 140px;
+}
+
+.asset-chip .thumb { width: 20px; height: 20px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }
+.asset-chip .icon { font-size: 14px; flex-shrink: 0; }
+.asset-chip .name { overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.asset-chip .remove { margin-left: 2px; cursor: pointer; color: var(--text-muted); font-size: 12px; flex-shrink: 0; }
+.asset-chip .remove:hover { color: var(--error); }
+
+.input-wrapper {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.input-wrapper textarea {
+  flex: 1;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: 22px;
+  padding: 12px 18px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  resize: none;
+  outline: none;
+  min-height: 44px;
+  max-height: 160px;
+  line-height: 1.5;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.input-wrapper textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.12); }
+.input-wrapper textarea::placeholder { color: var(--text-muted); }
+
+.attach-btn, .send-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+
+.attach-btn {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  position: relative;
+}
+
+.attach-btn:hover { background: var(--bg-tertiary); color: var(--accent); border-color: var(--accent); }
+.attach-btn svg, .send-btn svg { width: 18px; height: 18px; }
+
+.attach-btn .badge-num {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  background: var(--accent);
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.send-btn {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 2px 6px rgba(0,113,227,0.25);
+}
+
+.send-btn:hover { background: var(--accent-hover); transform: scale(1.05); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+/* Right panel */
+.proj-right-panel {
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.right-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+}
+
+.right-tab {
+  flex: 1;
+  padding: 10px 4px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: var(--transition);
+}
+
+.right-tab:hover { color: var(--text-secondary); }
+.right-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.right-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.right-panel-content.hidden { display: none; }
+
+/* Code preview */
+.code-preview {
+  background: var(--code-bg);
+  border: none;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.code-preview .code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #2c2c2e;
+  font-size: 12px;
+  color: rgba(255,255,255,0.6);
+  font-weight: 500;
+}
+
+.code-preview pre {
+  padding: 14px 16px;
+  font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+  color: var(--code-text);
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.modal-overlay.hidden { display: none; }
+
+.modal {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 32px;
+  width: 440px;
+  max-width: 90vw;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal h2 { font-size: 20px; margin-bottom: 24px; font-weight: 700; letter-spacing: -0.3px; }
+
+.modal label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+  margin-top: 16px;
+  letter-spacing: 0.1px;
+}
+
+.modal label:first-of-type { margin-top: 0; }
+
+.modal input, .modal select {
+  width: 100%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.modal input:focus, .modal select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,0.12); }
+
+.modal .modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 28px;
+}
+
+.modal .modal-actions button {
+  padding: 9px 22px;
+  border-radius: 980px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  border: none;
+}
+
+.btn-cancel { background: var(--bg-tertiary); color: var(--text-primary); }
+.btn-cancel:hover { background: var(--bg-hover); }
+.btn-primary { background: var(--accent) !important; color: white !important; box-shadow: 0 2px 8px rgba(0,113,227,0.2); }
+.btn-primary:hover { background: var(--accent-hover) !important; box-shadow: 0 4px 14px rgba(0,113,227,0.3); }
+
+/* Toast */
+.toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  background: var(--bg-glass);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 18px;
+  font-size: 13px;
+  box-shadow: var(--shadow);
+  animation: slideIn 0.35s cubic-bezier(0.25, 0.1, 0.25, 1);
+  max-width: 360px;
+  font-weight: 500;
+}
+
+.toast.success { border-left: 3px solid var(--success); }
+.toast.error { border-left: 3px solid var(--error); }
+.toast.info { border-left: 3px solid var(--accent); }
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* Empty state */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+  gap: 8px;
+}
+
+.empty-state svg { opacity: 0.25; }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+  #projectView.active { grid-template-columns: 1fr; }
+  .proj-sidebar, .proj-right-panel { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══════ HOME VIEW ══════ -->
+<div id="homeView">
+  <header class="home-header">
+    <div class="logo">
+      <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" fill="#0071e3"/><path d="M10 20V12l6 4-6 4z" fill="white"/><path d="M17 20V12l6 4-6 4z" fill="white" opacity="0.7"/></svg>
+      <span>GodotVibe</span>
+    </div>
+    <div class="status-bar">
+      <span class="status-dot" id="statusGodot">Godot</span>
+      <span class="status-dot" id="statusLLM">AI</span>
+      <span class="status-dot" id="statusAPI">API</span>
+    </div>
+    <button class="btn btn-secondary" onclick="showSettings()">Settings</button>
+  </header>
+
+  <div class="home-body">
+    <div class="home-hero">
+      <h1>GodotVibe</h1>
+      <p>AI-powered game creator for Godot Engine. Create or open a project to start building.</p>
+    </div>
+
+    <div class="home-actions">
+      <button class="btn btn-accent" onclick="showNewProjectModal()">+ New Project</button>
+      <button class="btn btn-secondary" onclick="showNewProjectFromTemplate()">From Template</button>
+    </div>
+
+    <div class="project-grid" id="projectGrid">
+      <div style="font-size:13px;color:var(--text-muted);text-align:center;padding:32px">Loading projects...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════ PROJECT VIEW ══════ -->
+<div id="projectView">
+  <!-- Header -->
+  <header class="proj-header">
+    <button class="back-btn" onclick="goHome()">&#8592; Home</button>
+    <span class="proj-title" id="projTitle"></span>
+    <span class="proj-path" id="projPath"></span>
+    <div class="proj-header-actions">
+      <button onclick="clearProjectChat()">Clear Chat</button>
+      <button onclick="openInEditor()">Open in Godot</button>
+      <button onclick="exportWeb()" id="exportWebBtn">&#127760; Export Web</button>
+      <button class="run-btn" onclick="runGame()">&#9654; Run</button>
+    </div>
+  </header>
+
+  <!-- Left sidebar: files + assets -->
+  <aside class="proj-sidebar">
+    <div class="sidebar-tabs">
+      <div class="sidebar-tab active" onclick="switchSidebarTab('files')">Files</div>
+      <div class="sidebar-tab" onclick="switchSidebarTab('assets')">Assets</div>
+    </div>
+    <div class="sidebar-panel" id="sidebarFiles">
+      <div class="empty-state" id="filesEmpty">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span>No files yet. Describe your game below!</span>
+      </div>
+      <div class="file-tree" id="fileTree" style="display:none"></div>
+    </div>
+    <div class="sidebar-panel hidden" id="sidebarAssets">
+      <div class="asset-upload-zone" onclick="document.getElementById('assetFileInput').click()" ondragover="event.preventDefault();this.style.borderColor='var(--accent)'" ondragleave="this.style.borderColor='var(--border)'" ondrop="handleAssetDrop(event)">
+        <div class="icon">📦</div>
+        <div class="title">Upload Assets</div>
+        <div class="hint">Drag & drop or click to browse<br>.png .jpg .wav .mp3 .glb .ttf ...</div>
+        <input type="file" id="assetFileInput" multiple accept=".png,.jpg,.jpeg,.webp,.svg,.bmp,.tga,.hdr,.exr,.wav,.ogg,.mp3,.glb,.gltf,.obj,.fbx,.dae,.ttf,.otf,.woff,.woff2,.tres,.tscn,.gdshader,.gd,.json,.cfg,.txt,.csv" style="display:none" onchange="handleAssetSelect(this.files)">
+      </div>
+      <div id="assetList">
+        <div style="font-size:11px;color:var(--text-muted);text-align:center;padding:12px 0">No assets uploaded yet</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat -->
+  <main class="proj-main">
+    <div class="chat-container" id="chatContainer">
+      <div class="chat-welcome" id="chatWelcome">
+        <h2>What game do you want to build?</h2>
+        <p>Chat with me about your game, ask questions, or describe what you want and I'll generate a complete Godot project. Upload assets first if you have sprites, sounds, or models.</p>
+        <div class="quick-prompts">
+          <div class="quick-prompt" onclick="sendQuickPrompt('Create a 2D platformer with a character that can run, jump on platforms, and collect coins. Add score display.')">
+            <div class="label">2D Platformer</div>
+            <div class="hint">Run, jump, collect coins</div>
+          </div>
+          <div class="quick-prompt" onclick="sendQuickPrompt('Create a top-down 2D shooter where the player controls a spaceship, moves with arrow keys, and shoots bullets at enemies coming from the top.')">
+            <div class="label">Space Shooter</div>
+            <div class="hint">Top-down, shoot enemies</div>
+          </div>
+          <div class="quick-prompt" onclick="sendQuickPrompt('Create a simple 3D FPS with a player that can walk around, look with mouse, and a ground plane with some obstacles.')">
+            <div class="label">3D FPS</div>
+            <div class="hint">First person, walk &amp; look</div>
+          </div>
+          <div class="quick-prompt" onclick="sendQuickPrompt('Create a Pong game: two paddles, a ball, score tracking, and the ball bounces off walls and paddles.')">
+            <div class="label">Pong</div>
+            <div class="hint">Classic two-player game</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="input-area" ondragover="event.preventDefault();this.style.background='rgba(71,140,191,0.08)'" ondragleave="this.style.background=''" ondrop="handleInputDrop(event)">
+      <div class="asset-preview-bar" id="assetPreviewBar">
+        <span class="label">Attached:</span>
+        <div id="assetChips" style="display:flex;gap:6px;flex-wrap:nowrap;overflow-x:auto"></div>
+      </div>
+      <div class="input-wrapper">
+        <button class="attach-btn" onclick="document.getElementById('chatAssetInput').click()" title="Attach assets">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          <span class="badge-num" id="attachBadge" style="display:none">0</span>
+        </button>
+        <input type="file" id="chatAssetInput" multiple accept=".png,.jpg,.jpeg,.webp,.svg,.bmp,.tga,.hdr,.exr,.wav,.ogg,.mp3,.glb,.gltf,.obj,.fbx,.dae,.ttf,.otf,.woff,.woff2,.tres,.tscn,.gdshader,.gd,.json,.cfg,.txt,.csv" style="display:none" onchange="handleChatAssetSelect(this.files)">
+        <textarea id="chatInput" rows="1" placeholder="Chat or describe your game..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}" oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Right panel: preview + play + class info -->
+  <aside class="proj-right-panel">
+    <div class="right-tabs">
+      <div class="right-tab active" onclick="switchRightTab('preview')">Preview</div>
+      <div class="right-tab" onclick="switchRightTab('play')">&#127918; Play</div>
+      <div class="right-tab" onclick="switchRightTab('classinfo')">API Docs</div>
+    </div>
+    <div class="right-panel-content" id="panelPreview">
+      <div class="code-preview" id="codePreview" style="display:none">
+        <div class="code-header"><span id="previewFileName"></span></div>
+        <pre><code id="previewCode"></code></pre>
+      </div>
+      <div class="empty-state" id="previewEmpty">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        <span>Select a file to preview</span>
+      </div>
+    </div>
+    <div class="right-panel-content hidden" id="panelPlay">
+      <div id="playEmpty" class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
+        <span>Click "Export Web" to build the game for browser play</span>
+        <button onclick="exportWeb()" style="margin-top:12px;padding:9px 22px;background:var(--accent);color:#fff;border:none;border-radius:980px;cursor:pointer;font-size:13px;font-weight:500;box-shadow:0 2px 8px rgba(0,113,227,0.2)">&#127760; Export Web</button>
+      </div>
+      <div id="playFrame" style="display:none;width:100%;height:100%;position:relative">
+        <div style="display:flex;gap:6px;padding:6px 10px;background:var(--bg-primary);border-bottom:1px solid var(--border);align-items:center">
+          <button onclick="reloadPlay()" style="background:none;border:1px solid var(--border-strong);color:var(--text-primary);padding:3px 10px;border-radius:980px;cursor:pointer;font-size:12px;font-weight:500" title="Reload">&#8635; Reload</button>
+          <button onclick="openPlayNewTab()" style="background:none;border:1px solid var(--border-strong);color:var(--text-primary);padding:3px 10px;border-radius:980px;cursor:pointer;font-size:12px;font-weight:500" title="Open in new tab">&#8599; New Tab</button>
+          <span style="flex:1"></span>
+          <span id="playUrl" style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        </div>
+        <iframe id="gameIframe" style="width:100%;height:calc(100% - 32px);border:none;background:#1d1d1f" sandbox="allow-scripts allow-same-origin allow-popups" allow="autoplay; fullscreen; gamepad"></iframe>
+      </div>
+    </div>
+    <div class="right-panel-content hidden" id="panelClassInfo">
+      <input type="text" style="width:100%;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;color:var(--text-primary);font-size:13px;outline:none;margin-bottom:10px" placeholder="Search Godot API classes..." oninput="searchAPI(this.value)">
+      <div id="apiResults"></div>
+    </div>
+  </aside>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay hidden" id="settingsModal" onclick="if(event.target===this)hideSettings()">
+  <div class="modal">
+    <h2>Settings</h2>
+    <label>API Key</label>
+    <input type="password" id="cfgApiKey" placeholder="Enter your API key...">
+    <label>Base URL</label>
+    <input type="text" id="cfgBaseUrl" placeholder="e.g. https://api.openai.com (OpenAI-compatible endpoint)">
+    <label>Model</label>
+    <select id="cfgModel">
+      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+      <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+      <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
+      <option value="global.anthropic.claude-haiku-4-5-20251001-v1:0">claude-4.5-haiku</option>
+      <option value="global.anthropic.claude-sonnet-4-5-20250929-v1:0">claude-4.5-sonnet</option>
+      <option value="global.anthropic.claude-opus-4-5-20251101-v1:0">claude-4.5-opus</option>
+      <option value="global.anthropic.claude-opus-4-6-v1">claude-4.6-opus</option>
+    </select>
+    <label>Output Directory</label>
+    <input type="text" id="cfgOutputDir" placeholder="~/GodotVibeProjects">
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="hideSettings()">Cancel</button>
+      <button class="btn-primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Project Modal -->
+<div class="modal-overlay hidden" id="newProjectModal" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="modal">
+    <h2>New Project</h2>
+    <label>Project Name</label>
+    <input type="text" id="newProjName" placeholder="MyAwesomeGame" autofocus>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="document.getElementById('newProjectModal').classList.add('hidden')">Cancel</button>
+      <button class="btn-primary" onclick="createNewProject()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Template Modal -->
+<div class="modal-overlay hidden" id="templateModal" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="modal">
+    <h2>Create from Template</h2>
+    <label>Project Name</label>
+    <input type="text" id="tmplProjName" placeholder="MyGame">
+    <label>Template</label>
+    <select id="tmplSelect" style="cursor:pointer;appearance:auto"></select>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="document.getElementById('templateModal').classList.add('hidden')">Cancel</button>
+      <button class="btn-primary" onclick="createFromTemplate()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+// ─── State ───
+let config = {
+  apiKey: localStorage.getItem('gv_apiKey') || '',
+  baseUrl: localStorage.getItem('gv_baseUrl') || '',
+  model: localStorage.getItem('gv_model') || 'gemini-2.5-flash',
+  outputDir: localStorage.getItem('gv_outputDir') || '',
+};
+
+let currentProjectDir = null;
+let currentProjectName = null;
+let currentFiles = {};
+let isLoading = false;
+let pendingChatAssets = [];
+let pendingChatImages = [];  // Base64 data URIs for vision/screenshots
+
+// ─── Init ───
+document.addEventListener('DOMContentLoaded', async () => {
+  await checkStatus();
+  await loadHomeProjects();
+  restoreSettings();
+
+  // Paste event — support Ctrl+V screenshots/images
+  document.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const reader = new FileReader();
+        reader.onload = () => {
+          pendingChatImages.push({ dataUri: reader.result, name: file.name || 'screenshot.png' });
+          updatePendingUI();
+          toast('Image pasted', 'info');
+        };
+        reader.readAsDataURL(file);
+        break;  // Only handle first image from clipboard
+      }
+    }
+  });
+});
+
+async function checkStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    toggle('statusGodot', data.godot_available);
+    toggle('statusLLM', data.llm_configured || !!config.apiKey);
+    toggle('statusAPI', data.api_cached);
+    if (!config.outputDir && data.default_output_dir) {
+      config.outputDir = data.default_output_dir;
+      document.getElementById('cfgOutputDir').value = config.outputDir;
+    }
+  } catch (e) { console.error('Status check failed:', e); }
+}
+
+function toggle(id, active) {
+  document.getElementById(id).classList.toggle('active', active);
+}
+
+function restoreSettings() {
+  document.getElementById('cfgApiKey').value = config.apiKey;
+  document.getElementById('cfgBaseUrl').value = config.baseUrl;
+  const sel = document.getElementById('cfgModel');
+  for (const opt of sel.options) {
+    if (opt.value === config.model) { opt.selected = true; break; }
+  }
+  document.getElementById('cfgOutputDir').value = config.outputDir;
+}
+
+// ─── HOME: Project List ───
+async function loadHomeProjects() {
+  const grid = document.getElementById('projectGrid');
+  try {
+    const params = config.outputDir ? `?output_dir=${encodeURIComponent(config.outputDir)}` : '';
+    const res = await fetch('/api/projects' + params);
+    const data = await res.json();
+
+    if (!data.projects || data.projects.length === 0) {
+      grid.innerHTML = '<div style="font-size:13px;color:var(--text-muted);text-align:center;padding:32px;grid-column:1/-1">No projects yet. Click "New Project" to get started!</div>';
+      return;
+    }
+
+    grid.innerHTML = data.projects.map(p => {
+      const date = new Date(p.modified * 1000);
+      const timeStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      const pathEsc = p.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      let badges = '';
+      if (p.has_memory) badges += '<span class="badge badge-mem">MEM</span>';
+      if (p.has_assets) badges += '<span class="badge badge-assets">ASSETS</span>';
+      if (p.has_chat) badges += '<span class="badge badge-chat">CHAT</span>';
+      return `
+        <div class="project-tile" onclick="openProject('${pathEsc}','${p.name}')">
+          <div class="tile-actions">
+            <button onclick="event.stopPropagation();runGameDirect('${pathEsc}')" title="Run">&#9654;</button>
+            <button onclick="event.stopPropagation();openEditorDirect('${pathEsc}')" title="Open in Godot">&#128193;</button>
+            <button class="del" onclick="event.stopPropagation();deleteProject('${pathEsc}','${p.name}')" title="Delete">&#10005;</button>
+          </div>
+          <div class="tile-name">&#127918; ${p.name}</div>
+          <div class="tile-meta">
+            <span>${p.file_count} files</span>
+            <span>${timeStr}</span>
+          </div>
+          <div class="tile-badges">${badges}</div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) {
+    grid.innerHTML = '<div style="font-size:13px;color:var(--error);text-align:center;padding:32px">Failed to load projects</div>';
+  }
+}
+
+// ─── PROJECT: Open / Navigate ───
+async function openProject(dir, name) {
+  currentProjectDir = dir.replace(/\\\\/g, '\\');
+  currentProjectName = name;
+
+  // Switch view
+  document.getElementById('homeView').style.display = 'none';
+  document.getElementById('projectView').classList.add('active');
+
+  // Set header
+  document.getElementById('projTitle').textContent = name;
+  document.getElementById('projPath').textContent = currentProjectDir;
+  document.getElementById('projPath').title = currentProjectDir;
+
+  // Reset backend chat context
+  await fetch('/api/reset-chat', { method: 'POST' });
+
+  // Load everything in parallel
+  await Promise.all([
+    loadProjectFiles(),
+    loadProjectAssets(),
+    loadProjectChat(),
+  ]);
+}
+
+function goHome() {
+  document.getElementById('projectView').classList.remove('active');
+  document.getElementById('homeView').style.display = '';
+  currentProjectDir = null;
+  currentProjectName = null;
+  currentFiles = {};
+  pendingChatAssets = [];
+  loadHomeProjects();
+}
+
+// ─── PROJECT: Load files ───
+async function loadProjectFiles() {
+  if (!currentProjectDir) return;
+  try {
+    const res = await fetch(`/api/project-files?project_dir=${encodeURIComponent(currentProjectDir)}`);
+    const data = await res.json();
+    currentFiles = data.files || {};
+    renderFileTree();
+  } catch(e) {
+    console.error('Load files failed:', e);
+  }
+}
+
+function renderFileTree() {
+  const tree = document.getElementById('fileTree');
+  const empty = document.getElementById('filesEmpty');
+
+  if (!currentFiles || Object.keys(currentFiles).length === 0) {
+    tree.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+
+  empty.style.display = 'none';
+  tree.style.display = 'block';
+
+  const icons = { '.gd': '📜', '.tscn': '🎬', '.godot': '⚙️', '.tres': '📦', '.gdshader': '🎨', '.svg': '🖼️' };
+  tree.innerHTML = Object.keys(currentFiles).sort().map(f => {
+    const ext = '.' + f.split('.').pop();
+    return `<div class="file-item" onclick="previewFile('${f}')">
+      <span class="icon">${icons[ext] || '📄'}</span>
+      <span>${f}</span>
+    </div>`;
+  }).join('');
+}
+
+function previewFile(filename) {
+  const content = currentFiles[filename];
+  if (!content) return;
+  switchRightTab('preview');
+  document.getElementById('previewEmpty').style.display = 'none';
+  document.getElementById('codePreview').style.display = 'block';
+  document.getElementById('previewFileName').textContent = filename;
+  document.getElementById('previewCode').textContent = content;
+  document.querySelectorAll('.file-item').forEach(el => {
+    el.classList.toggle('active', el.textContent.trim().includes(filename));
+  });
+}
+
+// ─── PROJECT: Load assets ───
+async function loadProjectAssets() {
+  if (!currentProjectDir) return;
+  const container = document.getElementById('assetList');
+  try {
+    const res = await fetch(`/api/assets/list?project_dir=${encodeURIComponent(currentProjectDir)}`);
+    const data = await res.json();
+
+    if (!data.assets || data.assets.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;color:var(--text-muted);text-align:center;padding:12px 0">No assets uploaded yet</div>';
+      return;
+    }
+
+    const catIcons = { image: '🖼️', audio: '🔊', model: '🧊', font: '🔤', other: '📄' };
+    container.innerHTML = `
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${data.assets.length} asset(s)</div>
+      ${data.assets.map(a => {
+        const sizeStr = a.size > 1024*1024 ? (a.size/(1024*1024)).toFixed(1)+'MB' : a.size > 1024 ? (a.size/1024).toFixed(0)+'KB' : a.size+'B';
+        const pathEsc = a.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const isImage = a.category === 'image';
+        const thumb = isImage
+          ? `<img src="/api/assets/preview?project_dir=${encodeURIComponent(currentProjectDir)}&path=${encodeURIComponent(a.path)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px;flex-shrink:0" onerror="this.style.display='none'">`
+          : `<span style="font-size:18px;width:32px;text-align:center;flex-shrink:0">${catIcons[a.category]||'📄'}</span>`;
+        return `
+          <div class="file-item" style="justify-content:space-between;padding:5px 8px" title="${a.res_path}">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0">
+              ${thumb}
+              <div style="min-width:0">
+                <div style="font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500">${a.filename}</div>
+                <div style="font-size:10px;color:var(--text-muted)">${a.res_path} · ${sizeStr}</div>
+              </div>
+            </div>
+            <button onclick="event.stopPropagation();deleteAsset('${pathEsc}','${a.filename}')" style="background:none;border:1px solid var(--border);color:var(--text-secondary);padding:2px 6px;border-radius:4px;cursor:pointer;font-size:10px;flex-shrink:0" title="Delete">✕</button>
+          </div>
+        `;
+      }).join('')}
+    `;
+  } catch (e) {
+    container.innerHTML = '<div style="font-size:11px;color:var(--error);padding:8px 0">Failed to load</div>';
+  }
+}
+
+// ─── PROJECT: Load chat history ───
+async function loadProjectChat() {
+  if (!currentProjectDir) return;
+  const container = document.getElementById('chatContainer');
+  container.innerHTML = '';
+
+  try {
+    const res = await fetch(`/api/project-chat?project_dir=${encodeURIComponent(currentProjectDir)}`);
+    const data = await res.json();
+
+    if (!data.messages || data.messages.length === 0) {
+      container.innerHTML = `
+        <div class="chat-welcome" id="chatWelcome">
+          <h2>What game do you want to build?</h2>
+          <p>Chat with me about your game, ask questions, or describe what you want and I'll generate a complete Godot project. Upload assets first if you have sprites, sounds, or models.</p>
+          <div class="quick-prompts">
+            <div class="quick-prompt" onclick="sendQuickPrompt('Create a 2D platformer with a character that can run, jump on platforms, and collect coins. Add score display.')">
+              <div class="label">2D Platformer</div><div class="hint">Run, jump, collect coins</div>
+            </div>
+            <div class="quick-prompt" onclick="sendQuickPrompt('Create a top-down 2D shooter where the player controls a spaceship, moves with arrow keys, and shoots bullets at enemies coming from the top.')">
+              <div class="label">Space Shooter</div><div class="hint">Top-down, shoot enemies</div>
+            </div>
+            <div class="quick-prompt" onclick="sendQuickPrompt('Create a simple 3D FPS with a player that can walk around, look with mouse, and a ground plane with some obstacles.')">
+              <div class="label">3D FPS</div><div class="hint">First person, walk &amp; look</div>
+            </div>
+            <div class="quick-prompt" onclick="sendQuickPrompt('Create a Pong game: two paddles, a ball, score tracking, and the ball bounces off walls and paddles.')">
+              <div class="label">Pong</div><div class="hint">Classic two-player game</div>
+            </div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    // Replay messages
+    data.messages.forEach(msg => {
+      if (msg.role === 'user') {
+        addUserMessage(msg.content);
+      } else {
+        addAssistantMessage(msg.content, msg.project || null, msg.steps || null);
+      }
+    });
+  } catch(e) {
+    console.error('Load chat failed:', e);
+  }
+}
+
+// ─── CHAT ───
+function sendQuickPrompt(text) {
+  document.getElementById('chatInput').value = text;
+  sendMessage();
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if ((!message && pendingChatImages.length === 0) || isLoading || !currentProjectDir) return;
+
+  // Hide welcome
+  const welcome = document.getElementById('chatWelcome');
+  if (welcome) welcome.remove();
+
+  // Build display message
+  const assetNames = pendingChatAssets.map(a => a.name);
+  const imageDataUris = pendingChatImages.map(pi => pi.dataUri);
+  let displayMsg = message || '';
+  if (assetNames.length > 0) displayMsg += `\n\n[Attached ${assetNames.length} asset(s): ${assetNames.join(', ')}]`;
+  if (pendingChatImages.length > 0 && assetNames.length === 0) displayMsg += `\n\n[Attached ${pendingChatImages.length} image(s)]`;
+  addUserMessage(displayMsg, imageDataUris);
+  saveProjectMessage('user', displayMsg);
+  input.value = '';
+  autoResize(input);
+
+  setLoading(true);
+  const progressEl = addStreamingProgress();
+
+  // Upload pending assets (file-based)
+  if (pendingChatAssets.length > 0) {
+    appendStepToProgress(progressEl, { type: 'thinking', description: `Uploading ${pendingChatAssets.length} asset(s)...` });
+    const formData = new FormData();
+    formData.append('project_dir', currentProjectDir);
+    formData.append('subfolder', 'assets');
+    for (const file of pendingChatAssets) formData.append('files', file);
+    try {
+      const upRes = await fetch('/api/assets/upload', { method: 'POST', body: formData });
+      const upData = await upRes.json();
+      if (upData.ok) {
+        appendStepToProgress(progressEl, { type: 'success', description: `Uploaded ${upData.uploaded.length} asset(s)` });
+        loadProjectAssets();
+      }
+    } catch (e) {
+      appendStepToProgress(progressEl, { type: 'error', description: `Upload failed: ${e.message}` });
+    }
+  }
+
+  // Capture images for API before clearing
+  const imagesToSend = imageDataUris.length > 0 ? imageDataUris : null;
+  clearPendingAssets();
+
+  try {
+    const res = await fetch('/api/generate-stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prompt: message || '(see attached image)',
+        project_dir: currentProjectDir,
+        api_key: config.apiKey || null,
+        base_url: config.baseUrl || null,
+        model: config.model || null,
+        images: imagesToSend,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Request failed');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalData = null;
+    const allSteps = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === 'step') {
+            allSteps.push(evt.step);
+            appendStepToProgress(progressEl, evt.step);
+          } else if (evt.type === 'done') {
+            finalData = evt;
+          } else if (evt.type === 'error') {
+            throw new Error(evt.message);
+          }
+        } catch (pe) {
+          if (pe.message && !pe.message.includes('JSON')) throw pe;
+        }
+      }
+    }
+
+    progressEl.remove();
+
+    if (finalData) {
+      // Update files if project data returned (not for pure chat)
+      if (finalData.project) {
+        await loadProjectFiles();
+        loadProjectAssets();
+      }
+
+      const reply = finalData.reply || (finalData.project
+        ? `Project updated! Scenes: ${finalData.project.scenes?.join(', ') || 'N/A'}`
+        : 'Done.');
+      
+      // Conversational with no project = pure chat (hide steps/project card)
+      // Conversational with project = agent finished work and replied (show everything)
+      const isPureChat = finalData.conversational && !finalData.project;
+      const fullReply = (!isPureChat && finalData.iterations)
+        ? reply + `\n\nAgent completed in **${finalData.iterations}** iteration(s).`
+        : reply;
+
+      const showSteps = !isPureChat && allSteps.length > 0 ? allSteps : null;
+      const showProject = !isPureChat ? (finalData.project || null) : null;
+      
+      addAssistantMessage(fullReply, showProject, showSteps);
+      saveProjectMessage('assistant', fullReply, showProject, showSteps);
+    }
+  } catch (e) {
+    progressEl.remove();
+    addAssistantMessage(`Error: ${e.message}\n\nMake sure your API key is configured in Settings.`);
+    toast(e.message, 'error');
+  }
+
+  setLoading(false);
+}
+
+async function saveProjectMessage(role, content, project, steps) {
+  if (!currentProjectDir) return;
+  const body = { project_dir: currentProjectDir, role, content };
+  if (project) body.project = project;
+  if (steps) body.steps = steps;
+  try {
+    await fetch('/api/project-chat/message', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  } catch(e) { console.error('Save message failed:', e); }
+}
+
+async function clearProjectChat() {
+  if (!currentProjectDir) return;
+  if (!confirm('Clear all chat history for this project?')) return;
+  try {
+    await fetch('/api/project-chat', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: currentProjectDir }),
+    });
+    await fetch('/api/reset-chat', { method: 'POST' });
+    await loadProjectChat();
+    toast('Chat cleared', 'info');
+  } catch(e) { toast('Failed to clear chat', 'error'); }
+}
+
+// ─── Message rendering ───
+function addUserMessage(text, images = []) {
+  const container = document.getElementById('chatContainer');
+  const div = document.createElement('div');
+  div.className = 'message user';
+  let imagesHtml = '';
+  if (images && images.length > 0) {
+    imagesHtml = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' +
+      images.map(uri => `<img src="${uri}" style="max-width:200px;max-height:150px;border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="window.open(this.src,'_blank')">`).join('') +
+      '</div>';
+  }
+  div.innerHTML = `<div class="avatar">U</div><div class="content">${escapeHtml(text)}${imagesHtml}</div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function addAssistantMessage(text, project = null, steps = null) {
+  const container = document.getElementById('chatContainer');
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+
+  let html = `<div class="avatar">AI</div><div class="content">${formatMarkdown(text)}`;
+
+  if (steps && steps.length > 0) {
+    html += `<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:8px">`;
+    html += `<div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:6px;letter-spacing:0.2px">Agent Steps (${steps.length})</div>`;
+    html += `<div style="font-size:11px;max-height:300px;overflow-y:auto;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px">`;
+    steps.forEach(step => {
+      const icon = step.type === 'success' ? '✓' : step.type === 'error' ? '✗' : step.type === 'tool_call' ? '⚙' : step.type === 'tool_result' ? '☰' : '●';
+      const color = step.type === 'success' ? 'var(--success)' : step.type === 'error' ? 'var(--error)' : step.type === 'tool_call' ? 'var(--accent)' : 'var(--text-muted)';
+      html += `<div style="padding:3px 0;color:${color}"><span>${icon}</span> ${escapeHtml(step.description)}`;
+      if (step.details) {
+        const short = step.details.length > 200 ? step.details.substring(0, 200) + '...' : step.details;
+        html += `<div style="padding-left:16px;color:var(--text-muted);font-size:10px;word-break:break-all">${escapeHtml(short)}</div>`;
+      }
+      html += `</div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  if (project) {
+    const dir = project.output_dir || currentProjectDir;
+    html += `
+      <div class="project-card">
+        <h4>&#10003; Project Generated</h4>
+        <div class="meta">${escapeHtml(dir)}</div>
+        <div class="actions">
+          <button class="primary" onclick="openInEditor()">Open in Godot</button>
+          <button onclick="runGame()">Run Game</button>
+          <button onclick="exportWeb()">&#127760; Export Web</button>
+        </div>
+      </div>
+    `;
+  }
+
+  html += '</div>';
+  div.innerHTML = html;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function addStreamingProgress() {
+  const container = document.getElementById('chatContainer');
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.innerHTML = `
+    <div class="avatar">AI</div>
+    <div class="content">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <div class="typing"><span></span><span></span><span></span></div>
+        <span style="font-size:12px;color:var(--text-muted)" id="streamingStatus">Agent is working...</span>
+      </div>
+      <div id="streamingSteps" style="font-size:11px;max-height:400px;overflow-y:auto;background:var(--bg-primary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px"></div>
+    </div>
+  `;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function appendStepToProgress(el, step) {
+  const stepsDiv = el.querySelector('#streamingSteps');
+  const statusEl = el.querySelector('#streamingStatus');
+  if (!stepsDiv) return;
+
+  const iconMap = { success: '✓', error: '✗', tool_call: '⚙', tool_result: '☰', thinking: '●' };
+  const colorMap = { success: '#248a3d', error: '#ff3b30', tool_call: '#0071e3', tool_result: '#6e6e73', thinking: '#ff9f0a' };
+
+  const stepDiv = document.createElement('div');
+  stepDiv.style.cssText = `padding:3px 0;color:${colorMap[step.type]||'var(--text-muted)'}`;
+  let html = `<span>${iconMap[step.type]||'●'}</span> ${escapeHtml(step.description)}`;
+  if (step.details) {
+    const short = step.details.length > 200 ? step.details.substring(0, 200) + '...' : step.details;
+    html += `<div style="padding-left:16px;color:var(--text-muted);font-size:10px;word-break:break-all">${escapeHtml(short)}</div>`;
+  }
+  stepDiv.innerHTML = html;
+  stepsDiv.appendChild(stepDiv);
+  if (statusEl) statusEl.textContent = step.description;
+  stepsDiv.scrollTop = stepsDiv.scrollHeight;
+  document.getElementById('chatContainer').scrollTop = document.getElementById('chatContainer').scrollHeight;
+}
+
+// ─── Asset Management ───
+async function handleAssetDrop(event) {
+  event.preventDefault();
+  event.currentTarget.style.borderColor = 'var(--border)';
+  if (!currentProjectDir) return;
+  const files = event.dataTransfer.files;
+  if (files.length > 0) await uploadAssetsDirectly(files);
+}
+
+async function handleAssetSelect(files) {
+  if (!currentProjectDir || files.length === 0) return;
+  await uploadAssetsDirectly(files);
+  document.getElementById('assetFileInput').value = '';
+}
+
+async function uploadAssetsDirectly(files) {
+  const formData = new FormData();
+  formData.append('project_dir', currentProjectDir);
+  formData.append('subfolder', 'assets');
+  for (const f of files) formData.append('files', f);
+  toast(`Uploading ${files.length} file(s)...`, 'info');
+  try {
+    const res = await fetch('/api/assets/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (data.ok) {
+      toast(`Uploaded ${data.uploaded.length} asset(s)`, 'success');
+      loadProjectAssets();
+    }
+    if (data.errors) data.errors.forEach(e => toast(e, 'error'));
+  } catch (e) { toast(`Upload failed: ${e.message}`, 'error'); }
+}
+
+async function deleteAsset(path, filename) {
+  if (!confirm(`Delete "${filename}"?`)) return;
+  try {
+    await fetch('/api/assets', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: currentProjectDir, asset_path: path }),
+    });
+    toast(`Deleted ${filename}`, 'success');
+    loadProjectAssets();
+  } catch(e) { toast('Delete failed', 'error'); }
+}
+
+// Chat attach
+function handleChatAssetSelect(files) {
+  for (const f of files) {
+    pendingChatAssets.push(f);
+    // Also add images to vision list
+    if (f.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        pendingChatImages.push({ dataUri: reader.result, name: f.name });
+        updatePendingUI();
+      };
+      reader.readAsDataURL(f);
+    }
+  }
+  document.getElementById('chatAssetInput').value = '';
+  updatePendingUI();
+  toast(`${files.length} file(s) attached`, 'info');
+}
+
+function handleInputDrop(event) {
+  event.preventDefault();
+  event.currentTarget.style.background = '';
+  for (const f of event.dataTransfer.files) {
+    pendingChatAssets.push(f);
+    if (f.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        pendingChatImages.push({ dataUri: reader.result, name: f.name });
+        updatePendingUI();
+      };
+      reader.readAsDataURL(f);
+    }
+  }
+  updatePendingUI();
+}
+
+function updatePendingUI() {
+  const bar = document.getElementById('assetPreviewBar');
+  const chips = document.getElementById('assetChips');
+  const badge = document.getElementById('attachBadge');
+  const totalCount = pendingChatAssets.length + pendingChatImages.filter(pi => !pendingChatAssets.some(a => a.name === pi.name)).length;
+
+  if (totalCount === 0) {
+    bar.classList.remove('visible');
+    badge.style.display = 'none';
+    return;
+  }
+
+  badge.style.display = 'flex';
+  badge.textContent = totalCount;
+  bar.classList.add('visible');
+  chips.innerHTML = '';
+
+  // Show file-attached assets
+  pendingChatAssets.slice(0, 5).forEach((file, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'asset-chip';
+    const isImg = file.type.startsWith('image/');
+    if (isImg) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = URL.createObjectURL(file);
+      chip.appendChild(img);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'icon';
+      const ext = file.name.split('.').pop().toLowerCase();
+      icon.textContent = ext.match(/wav|ogg|mp3/) ? '🔊' : ext.match(/glb|gltf|obj|fbx/) ? '🧊' : ext.match(/ttf|otf/) ? '🔤' : '📄';
+      chip.appendChild(icon);
+    }
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = file.name;
+    chip.appendChild(name);
+    const rm = document.createElement('span');
+    rm.className = 'remove';
+    rm.innerHTML = '✕';
+    rm.onclick = () => { pendingChatAssets.splice(idx, 1); updatePendingUI(); };
+    chip.appendChild(rm);
+    chips.appendChild(chip);
+  });
+
+  // Show pasted images (that aren't already shown as file attachments)
+  const pastedOnly = pendingChatImages.filter(pi => !pendingChatAssets.some(a => a.name === pi.name));
+  pastedOnly.slice(0, 3).forEach((pi, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'asset-chip';
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.src = pi.dataUri;
+    chip.appendChild(img);
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = pi.name;
+    chip.appendChild(name);
+    const rm = document.createElement('span');
+    rm.className = 'remove';
+    rm.innerHTML = '✕';
+    rm.onclick = () => { pendingChatImages.splice(pendingChatImages.indexOf(pi), 1); updatePendingUI(); };
+    chip.appendChild(rm);
+    chips.appendChild(chip);
+  });
+
+  if (pendingChatAssets.length > 5) {
+    const more = document.createElement('span');
+    more.className = 'label';
+    more.textContent = `+${pendingChatAssets.length - 5} more`;
+    chips.appendChild(more);
+  }
+}
+
+function clearPendingAssets() {
+  pendingChatAssets = [];
+  pendingChatImages = [];
+  updatePendingUI();
+}
+
+// ─── Tab Switching ───
+function switchSidebarTab(tab) {
+  document.querySelectorAll('.sidebar-tab').forEach((el, i) => {
+    el.classList.toggle('active', ['files', 'assets'][i] === tab);
+  });
+  document.getElementById('sidebarFiles').classList.toggle('hidden', tab !== 'files');
+  document.getElementById('sidebarAssets').classList.toggle('hidden', tab !== 'assets');
+}
+
+function switchRightTab(tab) {
+  const tabs = ['preview', 'play', 'classinfo'];
+  document.querySelectorAll('.right-tab').forEach((el, i) => {
+    el.classList.toggle('active', tabs[i] === tab);
+  });
+  document.getElementById('panelPreview').classList.toggle('hidden', tab !== 'preview');
+  document.getElementById('panelPlay').classList.toggle('hidden', tab !== 'play');
+  document.getElementById('panelClassInfo').classList.toggle('hidden', tab !== 'classinfo');
+}
+
+// ─── Actions ───
+async function openInEditor() {
+  if (!currentProjectDir) return;
+  try {
+    const res = await fetch('/api/open-editor', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: currentProjectDir }),
+    });
+    const data = await res.json();
+    if (data.ok) toast('Godot editor launched!', 'success');
+    else toast('Failed', 'error');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function runGame() {
+  if (!currentProjectDir) return;
+  try {
+    const res = await fetch('/api/run-game', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: currentProjectDir }),
+    });
+    const data = await res.json();
+    if (data.ok) toast('Game launched!', 'success');
+    else toast('Failed', 'error');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function openEditorDirect(dir) {
+  try {
+    await fetch('/api/open-editor', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+  } catch(e) {}
+}
+
+async function runGameDirect(dir) {
+  try {
+    await fetch('/api/run-game', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+  } catch(e) {}
+}
+
+async function exportWeb() {
+  if (!currentProjectDir) return;
+  const btn = document.getElementById('exportWebBtn');
+  const origText = btn.textContent;
+  btn.textContent = '⏳ Exporting...';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/export-web', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: currentProjectDir }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      toast(data.detail || 'Export failed', 'error');
+      return;
+    }
+    toast('Web export complete! Switching to Play tab...', 'success');
+    // Show play tab with the game
+    const dirName = currentProjectDir.split(/[\\/]/).pop();
+    const playUrl = data.play_url || `/play/${encodeURIComponent(dirName)}/`;
+    showPlayGame(playUrl);
+  } catch(e) {
+    toast(e.message, 'error');
+  } finally {
+    btn.textContent = origText;
+    btn.disabled = false;
+  }
+}
+
+function showPlayGame(url) {
+  switchRightTab('play');
+  const empty = document.getElementById('playEmpty');
+  const frame = document.getElementById('playFrame');
+  const iframe = document.getElementById('gameIframe');
+  const urlSpan = document.getElementById('playUrl');
+  empty.style.display = 'none';
+  frame.style.display = 'block';
+  urlSpan.textContent = url;
+  iframe.src = url;
+}
+
+function reloadPlay() {
+  const iframe = document.getElementById('gameIframe');
+  if (iframe.src) iframe.src = iframe.src;
+}
+
+function openPlayNewTab() {
+  const iframe = document.getElementById('gameIframe');
+  if (iframe.src) window.open(iframe.src, '_blank');
+}
+
+// ─── Project CRUD ───
+function showNewProjectModal() {
+  document.getElementById('newProjName').value = '';
+  document.getElementById('newProjectModal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('newProjName').focus(), 100);
+}
+
+async function createNewProject() {
+  const name = document.getElementById('newProjName').value.trim();
+  if (!name) { toast('Please enter a project name', 'error'); return; }
+  document.getElementById('newProjectModal').classList.add('hidden');
+  try {
+    const res = await fetch('/api/projects/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name, output_dir: config.outputDir || null }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      toast(`Project "${data.project.name}" created!`, 'success');
+      openProject(data.project.path, data.project.name);
+    } else {
+      toast('Failed to create project', 'error');
+    }
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function showNewProjectFromTemplate() {
+  document.getElementById('tmplProjName').value = '';
+  const sel = document.getElementById('tmplSelect');
+  if (sel.options.length === 0) {
+    try {
+      const res = await fetch('/api/templates');
+      const data = await res.json();
+      sel.innerHTML = data.templates.map(t => `<option value="${t.id}">${t.name} - ${t.description}</option>`).join('');
+    } catch(e) {}
+  }
+  document.getElementById('templateModal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('tmplProjName').focus(), 100);
+}
+
+async function createFromTemplate() {
+  const name = document.getElementById('tmplProjName').value.trim() || 'MyGame';
+  const templateId = document.getElementById('tmplSelect').value;
+  document.getElementById('templateModal').classList.add('hidden');
+  try {
+    const res = await fetch('/api/template', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        template_name: templateId,
+        project_name: name,
+        output_dir: config.outputDir ? `${config.outputDir}/${name}` : null,
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      toast(`Project "${name}" created from template!`, 'success');
+      openProject(data.project.output_dir, name);
+    } else toast('Failed', 'error');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function deleteProject(dir, name) {
+  if (!confirm(`Delete project "${name}"?\nThis will permanently delete all files.`)) return;
+  try {
+    const res = await fetch('/api/projects', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }),
+    });
+    if (res.ok) {
+      toast(`Deleted "${name}"`, 'success');
+      loadHomeProjects();
+    }
+  } catch(e) { toast('Delete failed', 'error'); }
+}
+
+// ─── API Browser ───
+async function searchAPI(query) {
+  const container = document.getElementById('apiResults');
+  if (!query || query.length < 2) {
+    try {
+      const res = await fetch('/api/classes');
+      const data = await res.json();
+      container.innerHTML = Object.entries(data.categories)
+        .sort((a,b) => b[1] - a[1])
+        .map(([cat, count]) => `<div style="padding:6px 10px;font-size:12px;color:var(--text-secondary);cursor:pointer;border-radius:6px;display:flex;justify-content:space-between" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background=''" onclick="browseCategory('${cat}')"><span>${cat}</span><span style="color:var(--text-muted)">${count}</span></div>`).join('');
+    } catch(e) {}
+    return;
+  }
+  try {
+    const res = await fetch(`/api/classes?search=${encodeURIComponent(query)}&limit=30`);
+    const data = await res.json();
+    container.innerHTML = data.results.map(c =>
+      `<div style="padding:6px 10px;font-size:12px;color:var(--text-secondary);cursor:pointer;border-radius:6px;display:flex;justify-content:space-between" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background=''" onclick="showClassDetail('${c.name}')"><span>${c.name}</span><span style="color:var(--text-muted)">${c.category}</span></div>`
+    ).join('');
+  } catch(e) {}
+}
+
+async function browseCategory(cat) {
+  const container = document.getElementById('apiResults');
+  try {
+    const res = await fetch(`/api/classes?category=${cat}&limit=100`);
+    const data = await res.json();
+    container.innerHTML = `<div style="padding:6px 10px;font-size:12px;color:var(--accent);cursor:pointer" onclick="searchAPI('')">← Back</div>` +
+      data.results.map(c => `<div style="padding:6px 10px;font-size:12px;color:var(--text-secondary);cursor:pointer;border-radius:6px" onmouseover="this.style.background='var(--bg-tertiary)'" onmouseout="this.style.background=''" onclick="showClassDetail('${c.name}')"><span>${c.name}</span></div>`).join('');
+  } catch(e) {}
+}
+
+async function showClassDetail(className) {
+  const container = document.getElementById('apiResults');
+  try {
+    const res = await fetch(`/api/classes/${className}`);
+    const d = await res.json();
+    let html = `<div style="cursor:pointer;color:var(--accent);font-size:12px;margin-bottom:8px" onclick="searchAPI('')">← Back</div>`;
+    html += `<h3 style="font-size:16px">${d.name}</h3>`;
+    if (d.inherits) html += `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:8px">extends ${d.inheritance_chain.join(' → ')}</div>`;
+    if (d.brief) html += `<p style="font-size:12px;color:var(--text-secondary);margin-bottom:12px">${d.brief}</p>`;
+    if (d.properties.length) {
+      html += `<div style="font-size:11px;font-weight:700;color:var(--accent);margin:12px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px">Properties (${d.properties.length})</div>`;
+      d.properties.slice(0,30).forEach(p => html += `<div style="font-size:11px;padding:2px 0;font-family:monospace;color:var(--text-secondary)"><span style="color:var(--text-primary)">${p.name}</span>: ${p.type}</div>`);
+    }
+    if (d.methods.length) {
+      html += `<div style="font-size:11px;font-weight:700;color:var(--accent);margin:12px 0 6px;border-bottom:1px solid var(--border);padding-bottom:4px">Methods (${d.methods.length})</div>`;
+      d.methods.slice(0,40).forEach(m => {
+        const params = m.params.map(p => `${p.name}: ${p.type}`).join(', ');
+        html += `<div style="font-size:11px;padding:2px 0;font-family:monospace;color:var(--text-secondary)"><span style="color:var(--text-primary)">${m.name}</span>(${params}) → ${m.return_type}</div>`;
+      });
+    }
+    container.innerHTML = html;
+  } catch(e) {}
+}
+
+// ─── Settings ───
+function showSettings() { document.getElementById('settingsModal').classList.remove('hidden'); }
+function hideSettings() { document.getElementById('settingsModal').classList.add('hidden'); }
+
+async function saveSettings() {
+  const saveBtn = document.querySelector('#settingsModal .btn-primary');
+  config.apiKey = document.getElementById('cfgApiKey').value.trim();
+  config.baseUrl = document.getElementById('cfgBaseUrl').value.trim();
+  config.model = document.getElementById('cfgModel').value || 'gemini-2.5-flash';
+  config.outputDir = document.getElementById('cfgOutputDir').value.trim();
+
+  localStorage.setItem('gv_apiKey', config.apiKey);
+  localStorage.setItem('gv_baseUrl', config.baseUrl);
+  localStorage.setItem('gv_model', config.model);
+  localStorage.setItem('gv_outputDir', config.outputDir);
+
+  if (!config.apiKey) {
+    hideSettings();
+    toggle('statusLLM', false);
+    toast('Settings saved (no API key)', 'info');
+    return;
+  }
+
+  saveBtn.textContent = 'Validating...';
+  saveBtn.disabled = true;
+
+  let success = false;
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ api_key: config.apiKey, base_url: config.baseUrl || null, model: config.model || null }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      toggle('statusLLM', true);
+      toast(`Connected! Model: ${data.model}`, 'success');
+      success = true;
+    } else {
+      toggle('statusLLM', false);
+      const err = await res.json();
+      toast(`Connection failed: ${err.detail || 'Unknown'}`, 'error');
+    }
+  } catch (e) {
+    toggle('statusLLM', false);
+    toast(`Connection failed: ${e.message}`, 'error');
+  }
+
+  saveBtn.textContent = 'Save';
+  saveBtn.disabled = false;
+  if (success) hideSettings();
+}
+
+// ─── Helpers ───
+function setLoading(v) {
+  isLoading = v;
+  document.getElementById('sendBtn').disabled = v;
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function formatMarkdown(text) {
+  text = escapeHtml(text);
+  text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/\n/g, '<br>');
+  return text;
+}
+
+function toast(msg, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 4000);
+}
+</script>
+</body>
+</html>

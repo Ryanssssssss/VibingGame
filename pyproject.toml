@@ -99,3 +99,23 @@ ignore-words-list = [
 	"thirdparty",
 	"vai",
 ]
+
+[project]
+name = "godot-dev"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "scons>=4.10.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "openai>=1.0.0",
+    "Pillow>=10.0.0",
+    "requests>=2.31.0",
+    "pydantic>=2.0.0",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "scons>=4.10.1",
+]
