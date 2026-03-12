@@ -293,6 +293,9 @@ def _estimate_messages_tokens(messages: list[dict]) -> int:
 # Maximum input context budget (leave room for output)
 MAX_CONTEXT_TOKENS = 100_000  # most models support 128K+, leave 28K for output
 
+# Memory budget: max tokens for project memory injection
+MAX_MEMORY_TOKENS = 2_000  # ~8000 chars — prevents memory bloat from degrading LLM quality
+
 # ─── Tool Definitions (OpenAI function calling format) ───
 
 AGENT_TOOLS = [
@@ -300,13 +303,13 @@ AGENT_TOOLS = [
         "type": "function",
         "function": {
             "name": "update_memory",
-            "description": "Update the project memory file (memory.md) with important context about the current project. Call this to record: project architecture decisions, known issues, what was changed and why, game design details, etc. This memory persists across conversations so you can pick up where you left off.",
+            "description": "Update the project memory file (memory.md) with important context about the current project. Call this to record: project architecture decisions, known issues, what was changed and why, game design details, etc. This memory persists across conversations so you can pick up where you left off.\n\n⚠️ MEMORY SIZE RULES (CRITICAL):\n- Keep memory UNDER 2000 characters total. If it's getting long, COMPRESS it.\n- DELETE resolved issues from ## Known Issues — don't keep fixed bugs.\n- ## Change Log: keep only the LAST 5 entries, remove older ones.\n- ## Project Overview and ## Architecture: keep concise (2-3 sentences each).\n- NEVER duplicate information across sections.\n- Think of memory as a BRIEF status snapshot, NOT a full history log.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "Complete markdown content for the project memory file. Should include sections like: ## Project Overview, ## Architecture, ## Known Issues, ## Change Log, ## Game Design Notes. Always write the FULL file content (not incremental)."
+                        "description": "Complete markdown content for the project memory file. MUST be under 2000 characters. Include: ## Project Overview (2-3 sentences), ## Architecture (key files only), ## Known Issues (ONLY unresolved), ## Change Log (last 5 entries only). Remove resolved issues and old changelog entries to stay concise."
                     }
                 },
                 "required": ["content"]
@@ -1934,18 +1937,34 @@ class AgentSession:
             return json.dumps({"ok": False, "error": str(e)})
 
     def _tool_update_memory(self, args: dict) -> str:
-        """Tool: update_memory - save project context to memory.md."""
+        """Tool: update_memory - save project context to memory.md with size enforcement."""
         content = args.get("content", "")
         if not self._output_dir:
             return json.dumps({"ok": False, "error": "No project directory set"})
+
+        # Hard limit: truncate if LLM ignores the 2000-char instruction
+        MAX_MEMORY_CHARS = 8000  # generous hard cap (~2000 tokens)
+        was_truncated = False
+        if len(content) > MAX_MEMORY_CHARS:
+            # Keep the beginning (overview/architecture) and trim the end (old changelog)
+            content = content[:MAX_MEMORY_CHARS]
+            # Find last complete line to avoid mid-line cut
+            last_newline = content.rfind("\n")
+            if last_newline > MAX_MEMORY_CHARS * 0.8:
+                content = content[:last_newline]
+            content += "\n\n<!-- Truncated: memory exceeded size limit. Keep it concise! -->\n"
+            was_truncated = True
 
         try:
             memory_path = Path(self._output_dir) / "memory.md"
             memory_path.parent.mkdir(parents=True, exist_ok=True)
             with open(memory_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
-            self._add_step("success", "Project memory updated", f"Saved {len(content)} chars to memory.md")
-            return json.dumps({"ok": True, "message": "Project memory saved to memory.md"})
+            msg = f"Saved {len(content)} chars to memory.md"
+            if was_truncated:
+                msg += " (truncated from original — please keep memory under 2000 chars next time)"
+            self._add_step("success", "Project memory updated", msg)
+            return json.dumps({"ok": True, "message": msg})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
@@ -1960,6 +1979,103 @@ class AgentSession:
             except Exception:
                 return None
         return None
+
+    def _prepare_memory_for_injection(self, memory_content: str) -> str:
+        """Prepare memory for injection: summarize if too long using LLM.
+
+        If memory exceeds MAX_MEMORY_TOKENS, use a single LLM call to compress
+        it into a concise ~500-word summary. This prevents memory bloat from
+        degrading the agent's ability to focus on the current request.
+        """
+        memory_tokens = _estimate_tokens(memory_content)
+
+        if memory_tokens <= MAX_MEMORY_TOKENS:
+            return memory_content
+
+        # Memory is too long — try LLM summarization
+        self._add_step("thinking",
+                       f"Memory too long (~{memory_tokens} tokens > {MAX_MEMORY_TOKENS}), summarizing...")
+        try:
+            summary_messages = [
+                {"role": "system", "content": (
+                    "You are a concise technical summarizer. Compress the following project memory "
+                    "into a brief summary under 500 words. Rules:\n"
+                    "- Keep: project name, game type, key architecture (main files/scenes)\n"
+                    "- Keep: ONLY unresolved known issues\n"
+                    "- Keep: last 3 changelog entries\n"
+                    "- Remove: resolved bugs, redundant details, verbose descriptions\n"
+                    "- Use the same markdown section headers (## Project Overview, ## Architecture, etc.)\n"
+                    "- Output ONLY the compressed memory, no explanation"
+                )},
+                {"role": "user", "content": f"Compress this project memory:\n\n{memory_content}"},
+            ]
+            summary = self.llm.invoke(summary_messages, temperature=0.1, max_tokens=2048)
+            if summary and summary.strip():
+                compressed = summary.strip()
+                new_tokens = _estimate_tokens(compressed)
+                self._add_step("success",
+                               f"Memory compressed: {memory_tokens} → {new_tokens} tokens")
+                return compressed
+        except Exception as e:
+            logger.warning("Memory summarization failed: %s", e)
+
+        # Fallback: hard truncate if LLM summarization fails
+        max_chars = MAX_MEMORY_TOKENS * 4  # ~4 chars per token
+        truncated = memory_content[:max_chars]
+        last_newline = truncated.rfind("\n")
+        if last_newline > max_chars * 0.7:
+            truncated = truncated[:last_newline]
+        truncated += "\n\n<!-- Memory truncated due to size. Older entries removed. -->"
+        self._add_step("thinking", "LLM summarization failed, using hard truncation")
+        return truncated
+
+    @staticmethod
+    def _deduplicate_history_against_memory(
+        chat_history: list[dict[str, Any]],
+        memory_content: str,
+    ) -> list[dict[str, Any]]:
+        """Remove chat history messages whose content substantially overlaps with memory.
+
+        Checks if >60% of a message's significant words already appear in the memory.
+        This prevents injecting redundant context that wastes tokens and confuses the LLM.
+        """
+        if not memory_content:
+            return chat_history
+
+        # Build set of significant words from memory (skip short/common words)
+        memory_words = set()
+        for word in memory_content.lower().split():
+            if len(word) > 3:  # Skip short words like "the", "and", "is"
+                memory_words.add(word.strip(".,;:!?()[]{}\"'`#*-_"))
+
+        if not memory_words:
+            return chat_history
+
+        filtered = []
+        for msg in chat_history:
+            content = msg.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                filtered.append(msg)
+                continue
+
+            # Calculate overlap ratio
+            msg_words = set()
+            for word in content.lower().split():
+                if len(word) > 3:
+                    msg_words.add(word.strip(".,;:!?()[]{}\"'`#*-_"))
+
+            if not msg_words:
+                filtered.append(msg)
+                continue
+
+            overlap = len(msg_words & memory_words) / len(msg_words)
+
+            if overlap < 0.6:
+                # Less than 60% overlap — keep it, it has unique information
+                filtered.append(msg)
+            # else: skip this message — it's mostly duplicated in memory
+
+        return filtered
 
     def _is_existing_project(self) -> bool:
         """Check if the output directory already has a Godot project."""
@@ -2238,13 +2354,14 @@ class AgentSession:
             {"role": "system", "content": system_content},
         ]
 
-        # Add memory context if available (marked as background — current request takes priority)
+        # Add memory context if available — summarize if too long to prevent attention dilution
         if memory_content:
+            prepared_memory = self._prepare_memory_for_injection(memory_content)
             messages.append({
                 "role": "system",
                 "content": (
                     "## PROJECT MEMORY (background reference only):\n\n"
-                    f"{memory_content}\n\n"
+                    f"{prepared_memory}\n\n"
                     "---\n"
                     "⚠️ This memory is from PREVIOUS sessions. It describes the project's general state.\n"
                     "The user's CURRENT message below is what you must focus on — it may describe NEW issues "
@@ -2257,6 +2374,10 @@ class AgentSession:
         # Keep budget small to avoid old conversations overshadowing the current request
         chat_history = self._chat_store.get(output_dir)
         if chat_history:
+            # Deduplicate: remove history messages that substantially overlap with memory
+            if memory_content:
+                chat_history = self._deduplicate_history_against_memory(chat_history, memory_content)
+
             history_budget = 6_000  # ~6K tokens — enough for recent context, not so much it dominates
             history_tokens = 0
             history_to_add = []
