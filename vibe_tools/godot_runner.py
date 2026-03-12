@@ -38,8 +38,10 @@ class GodotRunner:
 
     @staticmethod
     def _auto_detect() -> Path:
-        """Auto-detect the Godot executable in the bin/ directory or PATH."""
+        """Auto-detect the Godot executable in bin/ directory, GODOT_EXE env var, or PATH."""
         engine_root = Path(__file__).resolve().parent.parent
+
+        # 1. Check compiled binaries in the engine bin/ directory
         candidates = [
             engine_root / "bin" / "godot.windows.editor.x86_64.exe",
             engine_root / "bin" / "godot.windows.editor.x86_64.console.exe",
@@ -51,13 +53,20 @@ class GodotRunner:
             if candidate.exists():
                 return candidate
 
+        # 2. Check GODOT_EXE environment variable
+        env_exe = os.environ.get("GODOT_EXE")
+        if env_exe and Path(env_exe).exists():
+            return Path(env_exe)
+
+        # 3. Check PATH
         godot_in_path = shutil.which("godot")
         if godot_in_path:
             return Path(godot_in_path)
 
         raise FileNotFoundError(
             "Could not find Godot executable. "
-            "Build the engine first or specify the path manually."
+            "Set GODOT_EXE environment variable, configure the path in Settings, "
+            "or add Godot to your PATH."
         )
 
     @property
@@ -529,3 +538,200 @@ class GodotRunner:
             return {"ok": False, "error": f"Export timed out after {self.EXPORT_TIMEOUT}s"}
         except Exception as e:
             return {"ok": False, "error": f"Export error: {e}"}
+
+    # ─── Windows Export ───
+
+    def get_windows_template_status(self) -> dict:
+        """Check if Windows Desktop export templates are installed.
+
+        Returns dict with 'installed' (bool), 'path', 'version', and 'hint'.
+        """
+        tpl_dir = self._web_export_templates_dir()  # same parent dir for all templates
+        win_files = (
+            "windows_release_x86_64.exe",
+            "windows_debug_x86_64.exe",
+            "godot.windows.template_release.x86_64.exe",
+            "godot.windows.template_debug.x86_64.exe",
+        )
+        found: list[tuple[str, str]] = []
+        if tpl_dir.exists():
+            for version_dir in tpl_dir.iterdir():
+                if version_dir.is_dir():
+                    for wf in win_files:
+                        if (version_dir / wf).exists():
+                            found.append((version_dir.name, str(version_dir)))
+                            break
+        if found:
+            stable = [(v, p) for v, p in found if "stable" in v]
+            choice = stable[0] if stable else found[0]
+            return {
+                "installed": True,
+                "path": choice[1],
+                "version": choice[0],
+                "hint": None,
+            }
+        return {
+            "installed": False,
+            "path": str(tpl_dir),
+            "version": None,
+            "hint": (
+                "Windows export templates not found. To install:\n"
+                "1. Open Godot Editor → Editor → Manage Export Templates → Download\n"
+                "   OR\n"
+                "2. Download from https://godotengine.org/download and extract to:\n"
+                f"   {tpl_dir}/<version>/"
+            ),
+        }
+
+    @staticmethod
+    def _write_windows_export_presets(project_dir: str) -> Path:
+        """Ensure export_presets.cfg contains a Windows Desktop preset."""
+        project_path = Path(project_dir)
+        presets_path = project_path / "export_presets.cfg"
+
+        if presets_path.exists():
+            content = presets_path.read_text(encoding="utf-8")
+            if 'platform="Windows Desktop"' in content:
+                return presets_path
+            # Append a Windows preset after existing presets
+            # Find the next available preset index
+            import re as _re
+            indices = [int(m.group(1)) for m in _re.finditer(r'\[preset\.(\d+)\]', content)]
+            next_idx = max(indices) + 1 if indices else 0
+        else:
+            content = ""
+            next_idx = 0
+
+        win_cfg = textwrap.dedent(f"""\
+
+            [preset.{next_idx}]
+
+            name="Windows Desktop"
+            platform="Windows Desktop"
+            runnable=true
+            dedicated_server=false
+            custom_features=""
+            export_filter="all_resources"
+            include_filter="*.png,*.jpg,*.jpeg,*.webp,*.bmp,*.tga,*.svg,*.wav,*.ogg,*.mp3,*.tres,*.ttf,*.otf,*.glb,*.gltf,*.obj"
+            exclude_filter=""
+
+            [preset.{next_idx}.options]
+
+            custom_template/debug=""
+            custom_template/release=""
+            binary_format/embed_pck=false
+            texture_format/s3tc_bptc=true
+            texture_format/etc2_astc=false
+        """)
+
+        with open(presets_path, "a", encoding="utf-8") as f:
+            f.write(win_cfg)
+        return presets_path
+
+    def export_project_windows(self, project_dir: str, output_dir: str | None = None) -> dict:
+        """Export a Godot project as Windows Desktop (.exe + .pck).
+
+        Args:
+            project_dir: Path to the project root (containing project.godot)
+            output_dir: Where to place exported files. Defaults to project_dir/_win_export/
+
+        Returns:
+            dict with 'ok', 'export_dir', 'exe_path', 'zip_path', 'files', 'error'
+        """
+        import zipfile
+
+        if not self.is_available():
+            return {"ok": False, "error": "Godot executable not found"}
+
+        project_path = Path(project_dir).resolve()
+        if not (project_path / "project.godot").exists():
+            return {"ok": False, "error": "No project.godot found in project directory"}
+
+        tpl_status = self.get_windows_template_status()
+        if not tpl_status["installed"]:
+            return {"ok": False, "error": tpl_status["hint"]}
+
+        export_exe = self._find_stable_exe_for_export() or self._exe
+
+        if output_dir:
+            export_dir = Path(output_dir).resolve()
+        else:
+            export_dir = project_path / "_win_export"
+
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Derive exe name from project name
+        project_name = project_path.name
+        exe_path = export_dir / f"{project_name}.exe"
+
+        self._write_windows_export_presets(project_dir)
+
+        # Pre-export: force Godot to import all resources
+        try:
+            subprocess.run(
+                [str(export_exe), "--path", str(project_path), "--headless", "--import"],
+                capture_output=True,
+                timeout=60,
+                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+        except Exception as e:
+            logger.warning("Resource import failed: %s, proceeding with export anyway", e)
+
+        try:
+            result = subprocess.run(
+                [
+                    str(export_exe), "--path", str(project_path),
+                    "--headless", "--export-release", "Windows Desktop",
+                    str(exe_path),
+                ],
+                capture_output=True,
+                timeout=self.EXPORT_TIMEOUT,
+                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            combined = stdout + "\n" + stderr
+
+            if not exe_path.exists():
+                error_lines = [
+                    line.strip() for line in combined.splitlines()
+                    if line.strip() and any(kw in line.lower() for kw in
+                                            ["error", "failed", "cannot", "invalid"])
+                ]
+                error_msg = "\n".join(error_lines[:10]) if error_lines else combined[-1000:]
+                return {
+                    "ok": False,
+                    "error": f"Windows export failed (exit code {result.returncode}):\n{error_msg}",
+                }
+
+            # Package all exported files into a zip for download
+            zip_path = export_dir / f"{project_name}.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in sorted(export_dir.rglob("*")):
+                    if f.is_file() and f != zip_path:
+                        zf.write(f, f.relative_to(export_dir))
+
+            exported_files = []
+            for f in sorted(export_dir.rglob("*")):
+                if f.is_file():
+                    exported_files.append({
+                        "name": f.name,
+                        "path": str(f.relative_to(export_dir)),
+                        "size": f.stat().st_size,
+                    })
+
+            return {
+                "ok": True,
+                "export_dir": str(export_dir),
+                "exe_path": str(exe_path),
+                "zip_path": str(zip_path),
+                "zip_name": f"{project_name}.zip",
+                "files": exported_files,
+                "message": f"Windows export successful. {len(exported_files)} files generated.",
+            }
+
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": f"Export timed out after {self.EXPORT_TIMEOUT}s"}
+        except Exception as e:
+            return {"ok": False, "error": f"Windows export error: {e}"}

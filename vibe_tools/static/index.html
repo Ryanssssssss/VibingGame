@@ -1136,6 +1136,9 @@ body {
     </select>
     <label>Output Directory</label>
     <input type="text" id="cfgOutputDir" placeholder="~/GodotVibeProjects">
+    <label>Godot Executable Path</label>
+    <input type="text" id="cfgGodotExe" placeholder="e.g. C:\Godot\Godot_v4.x.exe or /Applications/Godot.app/Contents/MacOS/Godot">
+    <p style="color:#666;font-size:0.8em;margin:-4px 0 8px">Leave empty to auto-detect. Set this to enable direct Run Game / Open in Godot.</p>
     <div class="modal-actions">
       <button class="btn-cancel" onclick="hideSettings()">Cancel</button>
       <button class="btn-primary" onclick="saveSettings()">Save</button>
@@ -1171,6 +1174,89 @@ body {
   </div>
 </div>
 
+<!-- Run Game Remote Modal -->
+<div class="modal-overlay hidden" id="runGameModal" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="modal" style="max-width:560px">
+    <h2>🎮 Run Game Locally</h2>
+    <!-- Tab switcher -->
+    <div style="display:flex;gap:0;margin-bottom:16px;border-bottom:1px solid var(--border)">
+      <button id="runTabQuick" onclick="switchRunTab('quick')" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid var(--accent);color:var(--accent);font-weight:600;cursor:pointer;font-size:0.95em">⚡ Quick Run</button>
+      <button id="runTabManual" onclick="switchRunTab('manual')" style="flex:1;padding:10px;background:none;border:none;border-bottom:2px solid transparent;color:var(--text-secondary);font-weight:600;cursor:pointer;font-size:0.95em">📖 Manual Setup</button>
+    </div>
+
+    <!-- Quick Run Tab -->
+    <div id="runPanelQuick">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:1.3em">①</span>
+            <b>Download Project</b>
+          </div>
+          <p style="color:var(--text-secondary);margin:0 0 10px;font-size:0.9em">Download and extract the zip to a folder.</p>
+          <button class="btn-primary" onclick="downloadProjectFromModal()">⬇ Download Project (.zip)</button>
+        </div>
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:1.3em">②</span>
+            <b>Run in Terminal</b>
+          </div>
+          <p style="color:var(--text-secondary);margin:0 0 10px;font-size:0.9em">Extract the zip, then copy & paste this command in your terminal:</p>
+          <div id="runCmdBlock" style="position:relative">
+            <pre id="runCmdText" style="background:var(--code-bg);color:var(--code-text);border-radius:6px;padding:12px;font-size:0.85em;overflow-x:auto;margin:0;white-space:pre-wrap;word-break:break-all"></pre>
+            <button onclick="copyRunCmd()" style="position:absolute;top:6px;right:6px;background:rgba(255,255,255,0.15);border:none;color:#fff;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:0.8em">📋 Copy</button>
+          </div>
+          <div style="margin-top:8px">
+            <label style="font-size:0.85em;color:var(--text-secondary)">Godot path:</label>
+            <input type="text" id="runGodotPath" placeholder="/Applications/Godot.app/Contents/MacOS/Godot" oninput="updateRunCmd()" style="width:100%;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text-primary);font-size:0.85em;margin-top:4px">
+            <p style="color:var(--text-muted);font-size:0.75em;margin:4px 0 0">This is saved to Settings automatically.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual Setup Tab -->
+    <div id="runPanelManual" style="display:none">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:1.3em">①</span>
+            <b>Download Godot Engine</b>
+            <span style="color:var(--text-muted);font-size:0.85em">(only need once)</span>
+          </div>
+          <p style="color:var(--text-secondary);margin:0 0 10px;font-size:0.9em">Download the official portable version. No installation required.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <a href="https://godotengine.org/download/windows/" target="_blank" rel="noopener" style="display:inline-block;padding:8px 16px;background:#478cbf;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.9em">⬇ Windows</a>
+            <a href="https://godotengine.org/download/macos/" target="_blank" rel="noopener" style="display:inline-block;padding:8px 16px;background:#478cbf;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.9em">⬇ macOS</a>
+            <a href="https://godotengine.org/download/linux/" target="_blank" rel="noopener" style="display:inline-block;padding:8px 16px;background:#478cbf;color:#fff;border-radius:6px;text-decoration:none;font-weight:600;font-size:0.9em">⬇ Linux</a>
+          </div>
+        </div>
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:1.3em">②</span>
+            <b>Download Project</b>
+          </div>
+          <p style="color:var(--text-secondary);margin:0 0 10px;font-size:0.9em">Download and extract the project files.</p>
+          <button class="btn-primary" onclick="downloadProjectFromModal()">⬇ Download Project (.zip)</button>
+        </div>
+        <div style="background:var(--bg-tertiary);border-radius:8px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <span style="font-size:1.3em">③</span>
+            <b>Import & Run</b>
+          </div>
+          <p style="color:var(--text-secondary);margin:0;font-size:0.9em;line-height:1.6">
+            Open Godot → <b>Import</b> → select <code>project.godot</code> from extracted folder → <b>Import & Edit</b> → click <b>▶ (top-right)</b> or press <kbd>F5</kbd> to run.<br>
+            <span style="color:var(--text-muted)">macOS: press <kbd>Fn+F5</kbd>, or menu <b>Debug → Run Project</b>. If Godot can't open, right-click → Open to bypass Gatekeeper.</span>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-actions" style="margin-top:16px">
+      <button class="btn-cancel" onclick="document.getElementById('runGameModal').classList.add('hidden')">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast-container" id="toastContainer"></div>
 
@@ -1181,6 +1267,7 @@ let config = {
   baseUrl: localStorage.getItem('gv_baseUrl') || '',
   model: localStorage.getItem('gv_model') || 'gemini-2.5-flash',
   outputDir: localStorage.getItem('gv_outputDir') || '',
+  godotExe: localStorage.getItem('gv_godotExe') || '',
 };
 
 let currentProjectDir = null;
@@ -1244,6 +1331,7 @@ function restoreSettings() {
     if (opt.value === config.model) { opt.selected = true; break; }
   }
   document.getElementById('cfgOutputDir').value = config.outputDir;
+  document.getElementById('cfgGodotExe').value = config.godotExe;
 }
 
 // ─── HOME: Project List ───
@@ -1925,7 +2013,7 @@ async function openInEditor() {
     });
     const data = await res.json();
     if (data.ok) toast('Godot editor launched!', 'success');
-    else toast('Failed', 'error');
+    else toast(data.detail || 'Failed (remote users cannot open editor on server)', 'error');
   } catch(e) { toast(e.message, 'error'); }
 }
 
@@ -1938,20 +2026,109 @@ async function runGame() {
       body: JSON.stringify({ project_dir: currentProjectDir }),
     });
     const data = await res.json();
-    if (data.ok) toast('Game launched!', 'success');
-    else toast('Failed', 'error');
+    if (!res.ok) {
+      toast(data.detail || 'Failed', 'error');
+      return;
+    }
+    if (data.mode === 'remote') {
+      // Store download URL and project name for the modal
+      window._pendingProjectDownloadUrl = data.download_project_url;
+      window._pendingProjectName = data.project_name || 'project';
+      showRunGameModal();
+    } else {
+      toast('Game launched!', 'success');
+    }
   } catch(e) { toast(e.message, 'error'); }
+}
+
+function downloadProjectFromModal() {
+  const url = window._pendingProjectDownloadUrl;
+  if (!url) { toast('No project to download', 'error'); return; }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast('Project downloading...', 'success');
+}
+
+function showRunGameModal() {
+  // Initialize the Godot path input from config
+  const input = document.getElementById('runGodotPath');
+  input.value = config.godotExe || '';
+  updateRunCmd();
+  switchRunTab('quick');
+  document.getElementById('runGameModal').classList.remove('hidden');
+}
+
+function switchRunTab(tab) {
+  const quickBtn = document.getElementById('runTabQuick');
+  const manualBtn = document.getElementById('runTabManual');
+  const quickPanel = document.getElementById('runPanelQuick');
+  const manualPanel = document.getElementById('runPanelManual');
+  if (tab === 'quick') {
+    quickBtn.style.borderBottomColor = 'var(--accent)';
+    quickBtn.style.color = 'var(--accent)';
+    manualBtn.style.borderBottomColor = 'transparent';
+    manualBtn.style.color = 'var(--text-secondary)';
+    quickPanel.style.display = '';
+    manualPanel.style.display = 'none';
+  } else {
+    manualBtn.style.borderBottomColor = 'var(--accent)';
+    manualBtn.style.color = 'var(--accent)';
+    quickBtn.style.borderBottomColor = 'transparent';
+    quickBtn.style.color = 'var(--text-secondary)';
+    manualPanel.style.display = '';
+    quickPanel.style.display = 'none';
+  }
+}
+
+function updateRunCmd() {
+  const godotPath = document.getElementById('runGodotPath').value.trim();
+  const projName = window._pendingProjectName || 'project';
+  const exe = godotPath || '/path/to/godot';
+  // Save to config + localStorage whenever user types
+  if (godotPath) {
+    config.godotExe = godotPath;
+    localStorage.setItem('gv_godotExe', godotPath);
+    document.getElementById('cfgGodotExe').value = godotPath;
+  }
+  const cmd = `cd ~/Downloads && unzip -o ${projName}.zip -d ${projName} && "${exe}" --path ~/Downloads/${projName}`;
+  document.getElementById('runCmdText').textContent = cmd;
+}
+
+function copyRunCmd() {
+  const text = document.getElementById('runCmdText').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Command copied!', 'success')).catch(() => {
+    // Fallback
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    toast('Command copied!', 'success');
+  });
 }
 
 async function openEditorDirect(dir) {
   try {
-    await fetch('/api/open-editor', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+    const res = await fetch('/api/open-editor', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+    const data = await res.json();
+    if (!res.ok) toast(data.detail || 'Cannot open editor remotely', 'error');
   } catch(e) {}
 }
 
 async function runGameDirect(dir) {
   try {
-    await fetch('/api/run-game', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+    const res = await fetch('/api/run-game', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ project_dir: dir.replace(/\\\\/g, '\\') }) });
+    const data = await res.json();
+    if (data.mode === 'remote') {
+      window._pendingProjectDownloadUrl = data.download_project_url;
+      window._pendingProjectName = data.project_name || 'project';
+      showRunGameModal();
+    }
   } catch(e) {}
 }
 
@@ -2151,11 +2328,13 @@ async function saveSettings() {
   config.baseUrl = document.getElementById('cfgBaseUrl').value.trim();
   config.model = document.getElementById('cfgModel').value || 'gemini-2.5-flash';
   config.outputDir = document.getElementById('cfgOutputDir').value.trim();
+  config.godotExe = document.getElementById('cfgGodotExe').value.trim();
 
   localStorage.setItem('gv_apiKey', config.apiKey);
   localStorage.setItem('gv_baseUrl', config.baseUrl);
   localStorage.setItem('gv_model', config.model);
   localStorage.setItem('gv_outputDir', config.outputDir);
+  localStorage.setItem('gv_godotExe', config.godotExe);
 
   if (!config.apiKey) {
     hideSettings();
@@ -2172,11 +2351,12 @@ async function saveSettings() {
     const res = await fetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ api_key: config.apiKey, base_url: config.baseUrl || null, model: config.model || null }),
+      body: JSON.stringify({ api_key: config.apiKey, base_url: config.baseUrl || null, model: config.model || null, godot_exe: config.godotExe || null }),
     });
     if (res.ok) {
       const data = await res.json();
       toggle('statusLLM', true);
+      if (data.godot_available) toggle('statusGodot', true);
       toast(`Connected! Model: ${data.model}`, 'success');
       success = true;
     } else {

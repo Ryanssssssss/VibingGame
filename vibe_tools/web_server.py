@@ -11,6 +11,7 @@ import uuid
 import asyncio
 import threading
 import queue
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Ensure UTF-8
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -53,17 +55,152 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 # Serve static files
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Global state
+
+# ─── Session Management (multi-user isolation) ───
+
+class UserSession:
+    """Per-user isolated state."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.created = time.time()
+        self.last_active = time.time()
+        self._generator: GameGenerator | None = None
+        self._generator_lock = threading.Lock()
+        self._last_config: dict[str, str | None] = {"api_key": None, "base_url": None, "model": None}
+        self._pids: set[int] = set()  # tracked Godot processes
+        self._pids_lock = threading.Lock()
+        # Each session gets its own subdirectory
+        self.output_dir = DEFAULT_OUTPUT_DIR / session_id
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def touch(self):
+        self.last_active = time.time()
+
+    def get_generator(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> GameGenerator:
+        effective_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
+        effective_url = base_url or os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL")
+        effective_model = model or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+        with self._generator_lock:
+            config_changed = (
+                self._generator is None
+                or effective_key != self._last_config["api_key"]
+                or effective_url != self._last_config["base_url"]
+                or effective_model != self._last_config["model"]
+            )
+            if config_changed:
+                self._generator = GameGenerator(
+                    model=effective_model,
+                    api_key=effective_key,
+                    base_url=effective_url,
+                )
+                self._last_config = {"api_key": effective_key, "base_url": effective_url, "model": effective_model}
+            return self._generator
+
+    def track_pid(self, pid: int):
+        with self._pids_lock:
+            self._pids.add(pid)
+
+    def kill_all_processes(self):
+        with self._pids_lock:
+            for pid in list(self._pids):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            self._pids.clear()
+
+    def owns_project(self, project_dir: str) -> bool:
+        """Check if a project directory belongs to this session."""
+        try:
+            Path(project_dir).resolve().relative_to(self.output_dir.resolve())
+            return True
+        except ValueError:
+            return False
+
+
+class SessionManager:
+    """Thread-safe session store."""
+
+    SESSION_COOKIE = "godotvibe_session"
+    SESSION_TTL = 86400 * 7  # 7 days
+
+    def __init__(self):
+        self._sessions: dict[str, UserSession] = {}
+        self._lock = threading.Lock()
+
+    def get_or_create(self, session_id: str | None) -> tuple[UserSession, bool]:
+        """Return (session, is_new). Creates a new session if id is None or unknown."""
+        with self._lock:
+            if session_id and session_id in self._sessions:
+                sess = self._sessions[session_id]
+                sess.touch()
+                return sess, False
+            new_id = str(uuid.uuid4())
+            sess = UserSession(new_id)
+            self._sessions[new_id] = sess
+            return sess, True
+
+    def get(self, session_id: str) -> UserSession | None:
+        with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess:
+                sess.touch()
+            return sess
+
+    def cleanup_expired(self):
+        now = time.time()
+        with self._lock:
+            expired = [sid for sid, s in self._sessions.items() if now - s.last_active > self.SESSION_TTL]
+            for sid in expired:
+                self._sessions[sid].kill_all_processes()
+                del self._sessions[sid]
+
+
+_session_mgr = SessionManager()
+
+
+def _get_session(request: Request) -> UserSession:
+    """Extract session from request (set by middleware)."""
+    return request.state.session
+
+
+class SessionMiddleware(BaseHTTPMiddleware):
+    """Attach a UserSession to every request via cookie."""
+
+    async def dispatch(self, request: Request, call_next):
+        session_id = request.cookies.get(SessionManager.SESSION_COOKIE)
+        sess, is_new = _session_mgr.get_or_create(session_id)
+        request.state.session = sess
+
+        response = await call_next(request)
+
+        if is_new:
+            response.set_cookie(
+                key=SessionManager.SESSION_COOKIE,
+                value=sess.session_id,
+                max_age=SessionManager.SESSION_TTL,
+                httponly=True,
+                samesite="lax",
+            )
+        return response
+
+
+app.add_middleware(SessionMiddleware)
+
+
+# ─── Global state (shared, read-only or stateless) ───
+
 _api_kb: APIKnowledgeBase | None = None
 _runner: GodotRunner | None = None
-_generator: GameGenerator | None = None
 _project_gen = ProjectGenerator()
-_generator_lock = threading.Lock()  # Protect _generator creation (not needed per-request)
 
 
 def _resolve_safe_path(base_dir: str | Path, rel_path: str) -> Path | None:
@@ -89,39 +226,14 @@ def _get_api_kb() -> APIKnowledgeBase:
     return _api_kb
 
 
-def _get_runner() -> GodotRunner:
+def _get_runner() -> GodotRunner | None:
     global _runner
     if _runner is None:
-        _runner = GodotRunner(str(GODOT_EXE) if GODOT_EXE.exists() else None)
+        try:
+            _runner = GodotRunner(str(GODOT_EXE) if GODOT_EXE.exists() else None)
+        except FileNotFoundError:
+            return None
     return _runner
-
-
-_last_config: dict[str, str | None] = {"api_key": None, "base_url": None, "model": None}
-
-
-def _get_generator(api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> GameGenerator:
-    global _generator, _last_config
-    effective_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
-    effective_url = base_url or os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL")
-    effective_model = model or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-
-    with _generator_lock:
-        config_changed = (
-            _generator is None
-            or effective_key != _last_config["api_key"]
-            or effective_url != _last_config["base_url"]
-            or effective_model != _last_config["model"]
-        )
-
-        if config_changed:
-            _generator = GameGenerator(
-                model=effective_model,
-                api_key=effective_key,
-                base_url=effective_url,
-            )
-            _last_config = {"api_key": effective_key, "base_url": effective_url, "model": effective_model}
-
-        return _generator
 
 
 # ─── Pydantic Models ───
@@ -129,7 +241,7 @@ def _get_generator(api_key: str | None = None, base_url: str | None = None, mode
 class ChatRequest(BaseModel):
     message: str
     output_dir: str | None = None
-    project_dir: str | None = None  # Explicit project dir for continuing conversations
+    project_dir: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
@@ -138,11 +250,11 @@ class ChatRequest(BaseModel):
 class GenerateRequest(BaseModel):
     prompt: str
     output_dir: str | None = None
-    project_dir: str | None = None  # Explicit project dir for continuing conversations
+    project_dir: str | None = None
     api_key: str | None = None
     base_url: str | None = None
     model: str | None = None
-    images: list[str] | None = None  # Base64 data URIs for vision (screenshots / pasted images)
+    images: list[str] | None = None
 
 
 class TemplateRequest(BaseModel):
@@ -155,6 +267,7 @@ class ConfigRequest(BaseModel):
     api_key: str
     base_url: str | None = None
     model: str | None = None
+    godot_exe: str | None = None
 
 
 # ─── Routes ───
@@ -167,41 +280,64 @@ async def index():
 
 
 @app.get("/api/status")
-async def status():
+async def status(request: Request):
     """Get system status."""
-    godot_available = GODOT_EXE.exists()
+    sess = _get_session(request)
+    runner = _get_runner()
+    godot_available = runner.is_available() if runner else False
     api_cached = (API_CACHE_DIR / "api_knowledge.json").exists()
-    llm_configured = bool(os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")) or (_generator is not None)
+    llm_configured = bool(os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")) or (sess._generator is not None)
     return {
         "godot_available": godot_available,
-        "godot_path": str(GODOT_EXE) if godot_available else None,
+        "godot_path": runner.exe_path if runner and godot_available else None,
         "api_cached": api_cached,
         "llm_configured": llm_configured,
-        "default_output_dir": str(DEFAULT_OUTPUT_DIR),
+        "default_output_dir": str(sess.output_dir),
+        "session_id": sess.session_id,
     }
 
 
 @app.post("/api/config")
-async def configure(req: ConfigRequest):
-    """Configure LLM API key and settings."""
+async def configure(req: ConfigRequest, request: Request):
+    """Configure LLM API key and settings (per-session)."""
+    global _runner
+    sess = _get_session(request)
+
+    # Update Godot executable path if provided
+    if req.godot_exe:
+        exe_path = Path(req.godot_exe.strip())
+        if exe_path.exists():
+            _runner = GodotRunner(str(exe_path))
+            logger.info("Godot executable updated: %s", exe_path)
+        else:
+            raise HTTPException(status_code=400, detail=f"Godot executable not found at: {req.godot_exe}")
+
     try:
-        gen = _get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
-        # Quick connectivity test: list models
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
         available_models = []
         try:
             available_models = gen.llm.list_models()
         except Exception as test_err:
             logger.warning(f"Config test - model list failed (may be OK): {test_err}")
-        return {"ok": True, "model": gen.llm.model, "available_models": available_models}
+
+        runner = _get_runner()
+        return {
+            "ok": True,
+            "model": gen.llm.model,
+            "available_models": available_models,
+            "godot_available": runner.is_available() if runner else False,
+            "godot_path": runner.exe_path if runner and runner.is_available() else None,
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/models")
-async def list_models(api_key: str | None = None, base_url: str | None = None):
-    """List available LLM models."""
+async def list_models(request: Request, api_key: str | None = None, base_url: str | None = None):
+    """List available LLM models (per-session)."""
+    sess = _get_session(request)
     try:
-        gen = _get_generator(api_key=api_key, base_url=base_url)
+        gen = sess.get_generator(api_key=api_key, base_url=base_url)
         models = gen.llm.list_models()
         return {"models": models}
     except Exception as e:
@@ -209,11 +345,12 @@ async def list_models(api_key: str | None = None, base_url: str | None = None):
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
-    """Chat with the AI game designer (Agent mode)."""
+async def chat(req: ChatRequest, request: Request):
+    """Chat with the AI game designer (Agent mode, per-session)."""
+    sess = _get_session(request)
     try:
-        gen = _get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
-        output_dir = req.output_dir or str(DEFAULT_OUTPUT_DIR / "_pending")
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+        output_dir = req.output_dir or str(sess.output_dir / "_pending")
         result = gen.chat(req.message, output_dir=output_dir)
 
         response_data: dict[str, Any] = {
@@ -241,36 +378,32 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/api/generate")
-async def generate(req: GenerateRequest):
-    """Generate a game project from natural language using Agent loop."""
+async def generate(req: GenerateRequest, request: Request):
+    """Generate a game project from natural language using Agent loop (per-session)."""
+    sess = _get_session(request)
     try:
-        gen = _get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
 
-        # Determine output directory:
-        # 1. If project_dir is set, continue working on that project
-        # 2. If output_dir is set, use it
-        # 3. Default to latest
         if req.project_dir:
             output_dir = req.project_dir
         elif req.output_dir:
             output_dir = req.output_dir
         else:
-            output_dir = str(DEFAULT_OUTPUT_DIR / "_pending")
+            output_dir = str(sess.output_dir / "_pending")
 
-        # Use the agent loop
         result = gen.agent_generate(req.prompt, output_dir)
 
         # Rename _pending to actual project name
         if (result.get("project") and not result.get("conversational")
                 and not req.project_dir
-                and output_dir == str(DEFAULT_OUTPUT_DIR / "_pending")):
+                and output_dir == str(sess.output_dir / "_pending")):
             project_name = result["project"].get("name", "VibeGame")
             safe_name = "".join(c for c in project_name if c.isalnum() or c in " _-").strip() or "VibeGame"
-            new_dir = DEFAULT_OUTPUT_DIR / safe_name
+            new_dir = sess.output_dir / safe_name
             if new_dir.exists():
                 import time as _time
                 safe_name = f"{safe_name}_{int(_time.time()) % 10000}"
-                new_dir = DEFAULT_OUTPUT_DIR / safe_name
+                new_dir = sess.output_dir / safe_name
             pending_path = Path(output_dir)
             if pending_path.exists():
                 import shutil
@@ -292,12 +425,9 @@ async def generate(req: GenerateRequest):
 
 
 @app.post("/api/generate-stream")
-async def generate_stream(req: GenerateRequest):
-    """Generate a game project with real-time SSE streaming of agent steps.
-    
-    All messages go through agent_generate() — the LLM decides whether to
-    chat (text reply) or act (tool calls) based on context.
-    """
+async def generate_stream(req: GenerateRequest, request: Request):
+    """Generate a game project with real-time SSE streaming (per-session)."""
+    sess = _get_session(request)
     step_queue: queue.Queue = queue.Queue()
 
     def step_callback(step):
@@ -305,33 +435,29 @@ async def generate_stream(req: GenerateRequest):
 
     def run_agent():
         try:
-            gen = _get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+            gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
             if req.project_dir:
                 output_dir = req.project_dir
             elif req.output_dir:
                 output_dir = req.output_dir
             else:
-                output_dir = str(DEFAULT_OUTPUT_DIR / "_pending")
+                output_dir = str(sess.output_dir / "_pending")
             
-            # Unified agent loop — handles both chat and action
             result = gen.agent_generate(req.prompt, output_dir, step_callback=step_callback, images=req.images)
             
-            # If agent generated a project and output was _pending, rename to actual project name
+            # If agent generated a project and output was _pending, rename
             if (result.get("project") and not result.get("conversational")
                     and not req.project_dir
-                    and output_dir == str(DEFAULT_OUTPUT_DIR / "_pending")):
+                    and output_dir == str(sess.output_dir / "_pending")):
                 project_name = result["project"].get("name", "VibeGame")
-                # Sanitize name for filesystem
                 safe_name = "".join(c for c in project_name if c.isalnum() or c in " _-").strip()
                 if not safe_name:
                     safe_name = "VibeGame"
-                new_dir = DEFAULT_OUTPUT_DIR / safe_name
-                # If dir already exists, add suffix
+                new_dir = sess.output_dir / safe_name
                 if new_dir.exists() and new_dir != Path(output_dir):
                     import time as _time
                     safe_name = f"{safe_name}_{int(_time.time()) % 10000}"
-                    new_dir = DEFAULT_OUTPUT_DIR / safe_name
-                # Move the project
+                    new_dir = sess.output_dir / safe_name
                 pending_path = Path(output_dir)
                 if pending_path.exists():
                     import shutil
@@ -340,7 +466,6 @@ async def generate_stream(req: GenerateRequest):
                     pending_path.rename(new_dir)
                     result["project"]["output_dir"] = str(new_dir)
                     result["project"]["name"] = safe_name
-                    # Update files paths if needed
                     step_callback_obj = type('Step', (), {'to_dict': lambda self: {"type": "success", "description": f"Project saved as '{safe_name}'", "details": str(new_dir)}})()
                     step_queue.put(step_callback_obj.to_dict())
             
@@ -389,11 +514,12 @@ async def generate_stream(req: GenerateRequest):
 
 
 @app.post("/api/template")
-async def create_from_template(req: TemplateRequest):
-    """Create a project from a template."""
+async def create_from_template(req: TemplateRequest, request: Request):
+    """Create a project from a template (per-session)."""
+    sess = _get_session(request)
     try:
         template = get_template(req.template_name)
-        output_dir = req.output_dir or str(DEFAULT_OUTPUT_DIR / req.project_name)
+        output_dir = req.output_dir or str(sess.output_dir / req.project_name)
         plan = template.create_plan(req.project_name, output_dir)
         out = _project_gen.generate(plan)
 
@@ -508,40 +634,110 @@ async def get_class_detail(class_name: str):
     }
 
 
+def _is_local_request(request: Request) -> bool:
+    """Check if the request originates from the local machine."""
+    client_ip = request.client.host if request.client else ""
+    return client_ip in ("127.0.0.1", "::1", "0.0.0.0", "localhost")
+
+
 @app.post("/api/open-editor")
 async def open_editor(request: Request):
-    """Open a project in Godot editor."""
+    """Open a project in Godot editor (per-session, tracked). Local only."""
+    sess = _get_session(request)
     body = await request.json()
     project_dir = body.get("project_dir")
     if not project_dir:
         raise HTTPException(status_code=400, detail="project_dir required")
 
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Cannot open Godot editor remotely. Download the project and open it with your local Godot.")
+
+    if not sess.owns_project(project_dir):
+        raise HTTPException(status_code=403, detail="You can only open projects in your own session")
+
     runner = _get_runner()
-    if not runner.is_available():
+    if not runner or not runner.is_available():
         raise HTTPException(status_code=503, detail="Godot executable not found")
 
     proc = runner.open_editor(project_dir)
     if proc:
+        sess.track_pid(proc.pid)
         return {"ok": True, "pid": proc.pid}
     raise HTTPException(status_code=500, detail="Failed to launch editor")
 
 
+def _is_safe_project_dir(project_dir: str) -> bool:
+    """Check that a project directory is under DEFAULT_OUTPUT_DIR (prevents path traversal)."""
+    try:
+        Path(project_dir).resolve().relative_to(DEFAULT_OUTPUT_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 @app.post("/api/run-game")
 async def run_game(request: Request):
-    """Run a project in game mode."""
+    """Run a project in game mode.
+
+    - Local requests: launch Godot process directly on the server.
+    - Remote requests: return mode='remote' so the frontend shows download options.
+    """
+    sess = _get_session(request)
     body = await request.json()
     project_dir = body.get("project_dir")
     if not project_dir:
         raise HTTPException(status_code=400, detail="project_dir required")
 
-    runner = _get_runner()
-    if not runner.is_available():
-        raise HTTPException(status_code=503, detail="Godot executable not found")
+    # Local user → launch Godot process on this machine
+    if _is_local_request(request):
+        if not sess.owns_project(project_dir):
+            raise HTTPException(status_code=403, detail="You can only run projects in your own session")
+        runner = _get_runner()
+        if not runner or not runner.is_available():
+            raise HTTPException(status_code=503, detail="Godot executable not found")
+        proc = runner.run_project(project_dir)
+        if proc:
+            sess.track_pid(proc.pid)
+            return {"ok": True, "mode": "local", "pid": proc.pid}
+        raise HTTPException(status_code=500, detail="Failed to launch game")
 
-    proc = runner.run_project(project_dir)
-    if proc:
-        return {"ok": True, "pid": proc.pid}
-    raise HTTPException(status_code=500, detail="Failed to launch game")
+    # Remote user → return download link so they can run locally
+    if not _is_safe_project_dir(project_dir):
+        raise HTTPException(status_code=403, detail="Invalid project directory")
+
+    p = Path(project_dir).resolve()
+    if not p.exists() or not (p / "project.godot").exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Build a download URL using the encoded project path
+    from urllib.parse import quote
+    return {
+        "ok": True,
+        "mode": "remote",
+        "project_name": p.name,
+        "download_project_url": f"/api/download-project?project_dir={quote(str(p), safe='')}",
+    }
+
+
+@app.post("/api/stop-game")
+async def stop_game(request: Request):
+    """Kill all tracked Godot processes for this session."""
+    sess = _get_session(request)
+    sess.kill_all_processes()
+    return {"ok": True}
+
+
+@app.get("/api/session")
+async def session_info(request: Request):
+    """Get current session info."""
+    sess = _get_session(request)
+    return {
+        "session_id": sess.session_id,
+        "output_dir": str(sess.output_dir),
+        "created": sess.created,
+        "last_active": sess.last_active,
+        "tracked_pids": list(sess._pids),
+    }
 
 
 @app.get("/api/web-export-status")
@@ -556,11 +752,14 @@ async def web_export_status():
 
 @app.post("/api/export-web")
 async def export_web(request: Request):
-    """Export a project as HTML5/Web for browser play."""
+    """Export a project as HTML5/Web for browser play (per-session)."""
+    sess = _get_session(request)
     body = await request.json()
     project_dir = body.get("project_dir")
     if not project_dir:
         raise HTTPException(status_code=400, detail="project_dir required")
+    if not sess.owns_project(project_dir) and not _is_safe_project_dir(project_dir):
+        raise HTTPException(status_code=403, detail="Invalid project directory")
 
     runner = _get_runner()
     if not runner.is_available():
@@ -571,27 +770,141 @@ async def export_web(request: Request):
     if not result["ok"]:
         raise HTTPException(status_code=500, detail=result.get("error", "Export failed"))
 
-    # Use path-based URL so relative asset references (index.js, index.wasm, etc.) work
+    # Use session-scoped play URL: /play/<session_id>/<project_name>/
     dir_name = Path(project_dir).name
     return {
         "ok": True,
         "export_dir": result["export_dir"],
-        "play_url": f"/play/{dir_name}/",
+        "play_url": f"/play/{sess.session_id}/{dir_name}/",
         "files": result.get("files", []),
         "message": result.get("message", ""),
     }
 
 
-@app.get("/play/{dir_name}/{file_path:path}")
-async def play_game_files(dir_name: str, file_path: str = ""):
-    """Serve exported Web game files (index.html and all assets).
+@app.get("/api/windows-export-status")
+async def windows_export_status():
+    """Check if Windows Desktop export templates are installed."""
+    runner = _get_runner()
+    if not runner.is_available():
+        return {"available": False, "reason": "Godot executable not found"}
+    status = runner.get_windows_template_status()
+    return {"available": status["installed"], "path": status["path"], "hint": status.get("hint")}
 
-    Uses path prefix /play/<project_name>/ so that relative asset references
-    (index.js, index.wasm, index.pck, etc.) resolve correctly.
-    """
+
+@app.post("/api/export-windows")
+async def export_windows(request: Request):
+    """Export a project as Windows .exe for download (per-session)."""
+    sess = _get_session(request)
+    body = await request.json()
+    project_dir = body.get("project_dir")
+    if not project_dir:
+        raise HTTPException(status_code=400, detail="project_dir required")
+    if not sess.owns_project(project_dir) and not _is_safe_project_dir(project_dir):
+        raise HTTPException(status_code=403, detail="Invalid project directory")
+
+    runner = _get_runner()
+    if not runner.is_available():
+        raise HTTPException(status_code=503, detail="Godot executable not found")
+
+    result = runner.export_project_windows(project_dir)
+    if not result["ok"]:
+        raise HTTPException(status_code=500, detail=result.get("error", "Windows export failed"))
+
+    dir_name = Path(project_dir).name
+    zip_name = result.get("zip_name", f"{dir_name}.zip")
+    download_url = f"/api/download/{sess.session_id}/{dir_name}/{zip_name}"
+    return {
+        "ok": True,
+        "export_dir": result["export_dir"],
+        "download_url": download_url,
+        "zip_name": zip_name,
+        "files": result.get("files", []),
+        "message": result.get("message", ""),
+    }
+
+
+@app.get("/api/download/{session_id}/{dir_name}/{filename}")
+async def download_export(session_id: str, dir_name: str, filename: str):
+    """Download an exported file (Windows .zip) for a session's project."""
     from fastapi.responses import FileResponse
 
-    export_dir = DEFAULT_OUTPUT_DIR / dir_name / "_web_export"
+    sess = _session_mgr.get(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Look in _win_export directory
+    export_dir = sess.output_dir / dir_name / "_win_export"
+    if not export_dir.exists():
+        raise HTTPException(status_code=404, detail="Export directory not found")
+
+    target = _resolve_safe_path(str(export_dir), filename)
+    if target is None or not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(
+        target,
+        media_type="application/zip",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/download-project")
+async def download_project(project_dir: str):
+    """Package a project's source files into a zip and serve for download.
+
+    The zip contains all project files (scenes, scripts, assets, project.godot)
+    so the user can open it with a local Godot installation.
+    Accepts project_dir as a query parameter. Validates it is under DEFAULT_OUTPUT_DIR.
+    """
+    import zipfile
+    import io
+    from fastapi.responses import StreamingResponse as _SR
+
+    if not _is_safe_project_dir(project_dir):
+        raise HTTPException(status_code=403, detail="Invalid project directory")
+
+    p = Path(project_dir).resolve()
+    if not p.exists() or not (p / "project.godot").exists():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    dir_name = p.name
+
+    # Build zip in memory
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fpath in sorted(p.rglob("*")):
+            if not fpath.is_file():
+                continue
+            rel = fpath.relative_to(p)
+            rel_str = str(rel).replace("\\", "/")
+            # Skip export artifacts, .godot cache, and export config
+            if rel_str.startswith(("_web_export/", "_win_export/", ".godot/")):
+                continue
+            if rel_str == "export_presets.cfg":
+                continue
+            # Write into a top-level folder matching the project name
+            zf.write(fpath, f"{dir_name}/{rel_str}")
+    buf.seek(0)
+    zip_name = f"{dir_name}.zip"
+
+    return _SR(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+
+@app.get("/play/{session_id}/{dir_name}/{file_path:path}")
+async def play_game_files(session_id: str, dir_name: str, file_path: str = ""):
+    """Serve exported Web game files (session-scoped)."""
+    from fastapi.responses import FileResponse
+
+    sess = _session_mgr.get(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    export_dir = sess.output_dir / dir_name / "_web_export"
     if not export_dir.exists():
         raise HTTPException(status_code=404, detail="Export directory not found")
 
@@ -626,8 +939,10 @@ async def play_game_files(dir_name: str, file_path: str = ""):
 
 @app.post("/api/reset-chat")
 async def reset_chat(request: Request):
-    """Reset the chat history for a specific project."""
-    if _generator:
+    """Reset the chat history for a specific project (per-session)."""
+    sess = _get_session(request)
+    gen = sess._generator
+    if gen:
         body = {}
         try:
             body = await request.json()
@@ -635,9 +950,9 @@ async def reset_chat(request: Request):
             pass
         project_dir = body.get("project_dir")
         if project_dir:
-            _generator.reset_chat(project_dir)
+            gen.reset_chat(project_dir)
         else:
-            _generator.clear_all_chat()
+            gen.clear_all_chat()
     return {"ok": True}
 
 
@@ -846,9 +1161,10 @@ async def update_project_memory(request: Request):
 
 
 @app.get("/api/projects")
-async def list_projects(output_dir: str | None = None):
-    """List all generated projects in the output directory."""
-    base = Path(output_dir) if output_dir else DEFAULT_OUTPUT_DIR
+async def list_projects(request: Request, output_dir: str | None = None):
+    """List all generated projects in the session's output directory."""
+    sess = _get_session(request)
+    base = Path(output_dir) if output_dir else sess.output_dir
     if not base.exists():
         return {"projects": []}
 
@@ -890,8 +1206,9 @@ async def list_projects(output_dir: str | None = None):
 
 @app.delete("/api/projects")
 async def delete_project(request: Request):
-    """Delete a generated project."""
+    """Delete a generated project (per-session, ownership check)."""
     import shutil
+    sess = _get_session(request)
     body = await request.json()
     project_dir = body.get("project_dir")
     if not project_dir:
@@ -901,11 +1218,9 @@ async def delete_project(request: Request):
     if not path.exists():
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Safety: only allow deleting inside the default output dir
-    try:
-        path.relative_to(DEFAULT_OUTPUT_DIR)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Can only delete projects within the output directory")
+    # Safety: only allow deleting inside the session's output dir
+    if not sess.owns_project(project_dir):
+        raise HTTPException(status_code=403, detail="Can only delete projects within your own session")
 
     shutil.rmtree(path)
     return {"ok": True}
@@ -983,10 +1298,11 @@ async def clear_project_chat(request: Request):
 
 @app.post("/api/projects/create")
 async def create_project(request: Request):
-    """Create a new empty project directory with project.godot."""
+    """Create a new empty project directory with project.godot (per-session)."""
+    sess = _get_session(request)
     body = await request.json()
     name = body.get("name", "MyGame")
-    output_dir = body.get("output_dir") or str(DEFAULT_OUTPUT_DIR)
+    output_dir = body.get("output_dir") or str(sess.output_dir)
     
     # Sanitize name
     safe_name = "".join(c for c in name if c.isalnum() or c in " _-").strip() or "MyGame"

@@ -995,7 +995,6 @@ class AgentSession:
             missing_assets = self._verify_assets_in_scripts()
             result_data = {
                 "ok": True,
-                "output_dir": out,
                 "files": files,
                 "message": f"Project '{plan.name}' generated with {len(plan.scenes)} scene(s) and {len(plan.scripts)} script(s). "
                            f"Now call validate_project to check for errors."
@@ -1021,7 +1020,7 @@ class AgentSession:
 
         project_path = Path(self._output_dir)
         if not project_path.exists():
-            return json.dumps({"ok": False, "error": f"Project directory not found: {self._output_dir}"})
+            return json.dumps({"ok": False, "error": "Project directory not found"})
 
         runner = self._get_runner()
         errors = []
@@ -2221,7 +2220,7 @@ class AgentSession:
         memory_content = self._load_project_memory()
 
         if is_existing:
-            self._add_step("thinking", f"Continuing work on existing project at {output_dir}")
+            self._add_step("thinking", "Continuing work on existing project")
             if memory_content:
                 self._add_step("thinking", "Loaded project memory", memory_content[:200])
         else:
