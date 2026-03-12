@@ -401,7 +401,7 @@ class GodotRunner:
             dedicated_server=false
             custom_features=""
             export_filter="all_resources"
-            include_filter=""
+            include_filter="*.png,*.jpg,*.jpeg,*.webp,*.bmp,*.tga,*.svg,*.wav,*.ogg,*.mp3,*.tres,*.ttf,*.otf,*.glb,*.gltf,*.obj"
             exclude_filter=""
 
             [preset.0.options]
@@ -458,6 +458,26 @@ class GodotRunner:
         index_path = export_dir / "index.html"
 
         self._write_export_presets(project_dir)
+
+        # ── Pre-export: force Godot to import all resources ──
+        # When assets are uploaded via API (not through the editor), the
+        # .godot/imported/ cache may be missing or incomplete. Without this
+        # step, the exported .pck will NOT contain those assets.
+        try:
+            import_result = subprocess.run(
+                [
+                    str(export_exe), "--path", str(project_path),
+                    "--headless", "--import",
+                ],
+                capture_output=True,
+                timeout=60,
+                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            logger.info("Resource import exit code: %d", import_result.returncode)
+        except subprocess.TimeoutExpired:
+            logger.warning("Resource import timed out (60s), proceeding with export anyway")
+        except Exception as e:
+            logger.warning("Resource import failed: %s, proceeding with export anyway", e)
 
         try:
             result = subprocess.run(

@@ -145,7 +145,7 @@ def cmd_api(api_kb: APIKnowledgeBase | None):
 		print(f"  ... and {len(results) - 10} more results")
 
 
-def cmd_web(host: str = "127.0.0.1", port: int = 8899):
+def cmd_web(host: str = "0.0.0.0", port: int = 8899):
 	"""Start the web UI server."""
 	from vibe_tools.web_server import start_server
 	start_server(host=host, port=port)
@@ -206,8 +206,8 @@ def main():
 	parser = argparse.ArgumentParser(description="GodotVibe - Vibe Coding for Godot")
 	parser.add_argument("command", nargs="?", default=None,
 						help="Command: web (default), cli, new, templates, api")
-	parser.add_argument("--host", default="127.0.0.1", help="Web server host")
-	parser.add_argument("--port", type=int, default=8899, help="Web server port")
+	parser.add_argument("--host", default="0.0.0.0", help="Web server host")
+	parser.add_argument("--port", type=int, default=8000, help="Web server port")
 	args = parser.parse_args()
 
 	if args.command is None or args.command == "web":

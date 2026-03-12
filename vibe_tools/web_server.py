@@ -1092,7 +1092,7 @@ async def delete_conversation(conv_id: str):
     return {"ok": True}
 
 
-def start_server(host: str = "127.0.0.1", port: int = 8899):
+def start_server(host: str = "0.0.0.0", port: int = 8899):
     """Start the web server."""
     import uvicorn
     print(f"\n  GodotVibe Web UI starting at http://{host}:{port}")

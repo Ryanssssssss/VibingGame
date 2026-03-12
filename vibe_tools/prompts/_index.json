@@ -1,0 +1,20 @@
+{
+  "description": "Available prompt guides for Godot 4.x game development. Use get_prompt to read any guide when you need specific knowledge.",
+  "prompts": {
+    "godot4_basics": "Godot 4.x core rules, renamed classes (3.x→4.x), GDScript basics, CharacterBody2D/3D movement patterns",
+    "tscn_format": ".tscn scene file format (format=3): section order, ext_resource, sub_resource, node tree, signal connections",
+    "sprite_sheet": "How to handle sprite sheets: Sprite2D hframes/vframes, AnimatedSprite2D + SpriteFrames + AtlasTexture",
+    "physics_2d": "2D physics: body types, collision shapes, layers/masks, RigidBody2D, raycasting, Area2D signals",
+    "physics_3d": "3D physics: body types, collision shapes, CharacterBody3D movement, camera, lighting",
+    "animation": "Animation systems: AnimationPlayer keyframes, AnimatedSprite2D frames, Tween procedural animation, Timer",
+    "audio": "Audio: AudioStreamPlayer/2D/3D, buses, formats (.ogg/.wav), volume/pitch, autoplay",
+    "gui_controls": "GUI/HUD: layout containers, 20+ control types, anchoring, theme overrides, CanvasLayer HUD pattern",
+    "input_handling": "Input: action mapping, polling, event-based, touch, mouse capture, Input.get_vector/get_axis",
+    "tilemap": "TileMapLayer (NOT TileMap): setup, placing tiles, physics, programmatic generation",
+    "navigation": "Navigation/pathfinding: NavigationRegion2D/3D, NavigationAgent2D/3D, navmesh baking",
+    "particles": "GPU particles 2D/3D: ParticleProcessMaterial, color ramps, common effects (explosion/fire/smoke/rain)",
+    "networking": "Multiplayer: ENet/WebSocket, RPC, MultiplayerSpawner/Synchronizer, authority",
+    "shaders": "Shaders: canvas_item/spatial/particles, ShaderMaterial, flash/outline examples, StandardMaterial3D",
+    "signals_patterns": "Signals, scene management, groups, autoload singletons, state machine, object pool, screen shake"
+  }
+}

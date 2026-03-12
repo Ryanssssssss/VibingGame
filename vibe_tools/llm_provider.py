@@ -22,6 +22,7 @@ from typing import Any
 from vibe_tools.llm_transfer import SimpleLLMProvider
 from vibe_tools.models import (
     ASSET_EXTENSIONS_ALL, IGNORED_DIRS, PROJECT_SOURCE_EXTENSIONS,
+    ASSET_EXTENSIONS_IMAGE,
     classify_asset, is_ignored_path,
     ProjectPlan, ProjectSettings, GameType, SceneDesc, ScriptDesc,
     NodeDesc, ExportVar, OnReadyVar, FunctionDesc, InputEvent,
@@ -29,6 +30,243 @@ from vibe_tools.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Sprite Sheet Analyzer ───
+
+def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
+    """Analyze an image to detect if it's a sprite sheet and extract grid metadata.
+    
+    Uses Pillow to read image dimensions, then analyzes transparency patterns
+    to detect frame grid layout. Returns metadata dict or None if not a sprite sheet.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    try:
+        with Image.open(file_path) as img:
+            width, height = img.size
+            fmt = img.format or file_path.suffix.lstrip(".").upper()
+
+            # Too small to be a sprite sheet (likely a single sprite)
+            if width <= 64 and height <= 64:
+                return {"width": width, "height": height, "is_sheet": False}
+
+            # If image has no alpha channel, we can still try dimension-based heuristics
+            has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+
+            result: dict[str, Any] = {
+                "width": width,
+                "height": height,
+                "format": fmt,
+                "is_sheet": False,
+            }
+
+            if has_alpha:
+                # Convert to RGBA for analysis
+                rgba = img.convert("RGBA") if img.mode != "RGBA" else img
+                grid = _detect_grid_from_alpha(rgba, width, height)
+                if grid:
+                    result.update(grid)
+                    result["is_sheet"] = True
+                    return result
+
+            # Fallback: dimension-based heuristic for common sprite sheet sizes
+            grid = _guess_grid_from_dimensions(width, height)
+            if grid:
+                result.update(grid)
+                result["is_sheet"] = True
+
+            return result
+    except Exception as e:
+        logger.debug("Failed to analyze sprite sheet %s: %s", file_path, e)
+        return None
+
+
+def _detect_grid_from_alpha(rgba_img: Any, width: int, height: int) -> dict[str, Any] | None:
+    """Detect sprite sheet grid by scanning for transparent separator rows/columns.
+    Uses pure Pillow (no numpy dependency)."""
+    try:
+        alpha_data = list(rgba_img.split()[3].getdata())  # Extract alpha channel
+    except Exception:
+        return None
+
+    # Build row and column alpha sums
+    row_alpha_sum = [0] * height
+    col_alpha_sum = [0] * width
+    for y in range(height):
+        row_start = y * width
+        for x in range(width):
+            a = alpha_data[row_start + x]
+            row_alpha_sum[y] += a
+            col_alpha_sum[x] += a
+
+    # Threshold: a row/col is "empty" if its total alpha is very low
+    row_threshold = width * 2   # Nearly fully transparent
+    col_threshold = height * 2
+
+    empty_rows = [i for i in range(height) if row_alpha_sum[i] <= row_threshold]
+    empty_cols = [i for i in range(width) if col_alpha_sum[i] <= col_threshold]
+
+    # Detect frame boundaries from empty rows/columns
+    row_boundaries = _find_boundaries(empty_rows, height)
+    col_boundaries = _find_boundaries(empty_cols, width)
+
+    if len(row_boundaries) < 2 or len(col_boundaries) < 2:
+        return None
+
+    # Calculate frame dimensions
+    frame_heights = [row_boundaries[i + 1] - row_boundaries[i] for i in range(len(row_boundaries) - 1)]
+    frame_widths = [col_boundaries[i + 1] - col_boundaries[i] for i in range(len(col_boundaries) - 1)]
+
+    if not frame_heights or not frame_widths:
+        return None
+
+    # Use most common frame size (mode)
+    frame_h = max(set(frame_heights), key=frame_heights.count)
+    frame_w = max(set(frame_widths), key=frame_widths.count)
+
+    if frame_w < 8 or frame_h < 8:
+        return None
+
+    vframes = max(1, round(height / frame_h))
+    hframes = max(1, round(width / frame_w))
+
+    if hframes <= 1 and vframes <= 1:
+        return None
+
+    # Count non-empty frames per row for animation detection
+    rows_info = _detect_animation_rows(alpha_data, width, hframes, vframes, frame_w, frame_h)
+
+    return {
+        "hframes": hframes,
+        "vframes": vframes,
+        "frame_width": frame_w,
+        "frame_height": frame_h,
+        "total_frames": hframes * vframes,
+        "rows_info": rows_info,
+    }
+
+
+def _find_boundaries(empty_indices: list[int], total_size: int) -> list[int]:
+    """Find frame boundaries from a list of empty row/column indices."""
+    if not empty_indices:
+        return [0, total_size]
+
+    boundaries = [0]
+    prev = -2
+    for idx in empty_indices:
+        if idx - prev > 1:
+            # Start of a new empty gap
+            if prev >= 0:
+                boundaries.append(prev + 1)  # End of previous gap is a boundary
+        prev = idx
+
+    # Add the last boundary
+    if empty_indices[-1] < total_size - 1:
+        boundaries.append(empty_indices[-1] + 1)
+    boundaries.append(total_size)
+
+    # Deduplicate and sort
+    return sorted(set(boundaries))
+
+
+def _detect_animation_rows(alpha_data: list[int], img_width: int,
+                           hframes: int, vframes: int,
+                           frame_w: int, frame_h: int) -> list[dict[str, Any]]:
+    """Detect how many non-empty frames are in each row (for animation labeling).
+    Uses flat alpha_data list from Pillow (no numpy)."""
+    rows_info = []
+    common_anim_names = ["idle", "run", "walk", "jump", "fall", "attack", "hurt", "die", "climb", "swim"]
+
+    for row in range(vframes):
+        y_start = row * frame_h
+        non_empty = 0
+        for col in range(hframes):
+            x_start = col * frame_w
+            # Check if any pixel in this frame has alpha > 0
+            frame_has_content = False
+            for y in range(y_start, min(y_start + frame_h, len(alpha_data) // img_width)):
+                row_offset = y * img_width
+                for x in range(x_start, min(x_start + frame_w, img_width)):
+                    if row_offset + x < len(alpha_data) and alpha_data[row_offset + x] > 0:
+                        frame_has_content = True
+                        break
+                if frame_has_content:
+                    break
+            if frame_has_content:
+                non_empty += 1
+
+        if non_empty > 0:
+            anim_name = common_anim_names[row] if row < len(common_anim_names) else f"anim_{row}"
+            rows_info.append({
+                "row": row,
+                "frame_count": non_empty,
+                "suggested_name": anim_name,
+            })
+
+    return rows_info
+
+
+def _guess_grid_from_dimensions(width: int, height: int) -> dict[str, Any] | None:
+    """Fallback: guess grid layout from image dimensions using common frame sizes."""
+    # Common frame sizes in pixel art
+    common_sizes = [16, 24, 32, 48, 64, 96, 128]
+
+    best = None
+    best_score = 0
+
+    for fs in common_sizes:
+        if width % fs == 0 and height % fs == 0:
+            h = width // fs
+            v = height // fs
+            if h >= 2 or v >= 2:  # At least 2 frames in one dimension
+                score = h * v  # Prefer more frames
+                if h >= 2 and v >= 2:
+                    score *= 2  # Bonus for grid in both dimensions
+                if score > best_score:
+                    best_score = score
+                    best = {"hframes": h, "vframes": v, "frame_width": fs, "frame_height": fs, "total_frames": h * v, "rows_info": []}
+
+    # Also try non-square frames: wide sprite sheets (width >> height)
+    if best is None and width > height * 2:
+        # Likely a single-row sprite strip
+        for fs in common_sizes:
+            if height <= fs * 1.5 and width % fs == 0:
+                h = width // fs
+                if h >= 2:
+                    best = {"hframes": h, "vframes": 1, "frame_width": fs, "frame_height": height, "total_frames": h, "rows_info": []}
+                    break
+
+    return best
+
+
+def _format_sprite_sheet_info(meta: dict[str, Any], res_path: str) -> str:
+    """Format sprite sheet metadata into a concise string for LLM injection."""
+    w, h = meta["width"], meta["height"]
+
+    if not meta.get("is_sheet"):
+        return f"Single image ({w}×{h}px)"
+
+    hf = meta["hframes"]
+    vf = meta["vframes"]
+    fw = meta["frame_width"]
+    fh = meta["frame_height"]
+
+    lines = [f"SPRITE SHEET ({w}×{h}px, grid {hf}×{vf}, frame {fw}×{fh}px)"]
+
+    rows_info = meta.get("rows_info", [])
+    if rows_info:
+        for ri in rows_info[:8]:  # Max 8 rows shown
+            lines.append(f"  Row {ri['row']} ({ri['frame_count']} frames): suggested \"{ri['suggested_name']}\"")
+
+    lines.append(f"  USE Sprite2D: hframes={hf}, vframes={vf}, frame=N")
+    lines.append(f"  OR AnimatedSprite2D + SpriteFrames + AtlasTexture(region=Rect2(col*{fw}, row*{fh}, {fw}, {fh}))")
+    lines.append(f"  ⚠️ DO NOT use this as a single texture — it will display the ENTIRE sheet!")
+
+    return "\n".join(lines)
 
 # ─── Approximate token counting ───
 # ~4 chars per token for English/code, conservative estimate
@@ -365,6 +603,52 @@ AGENT_TOOLS = [
     },
 ]
 
+# ─── Tool-Prompt Bindings ───
+# Each tool can have static prompts (always injected) and dynamic prompts
+# (injected based on tool args, e.g. file extension).
+# Prompts are injected into tool results automatically on first use per session.
+
+TOOL_PROMPTS: dict[str, list[str]] = {
+    # Project generation needs core Godot knowledge + scene format
+    "generate_project": ["godot4_basics", "tscn_format", "signals_patterns"],
+    # Resource creation needs scene format knowledge
+    "create_resource": ["tscn_format"],
+    # Input/settings configuration
+    "edit_project_settings": ["input_handling"],
+}
+
+# Dynamic prompt rules: based on tool args content / file extension
+# Format: (tool_name, arg_condition_fn) → [prompts]
+# These are checked at runtime for context-sensitive injection.
+def _get_dynamic_prompts(tool_name: str, args: dict, tool_result: str) -> list[str]:
+    """Determine additional prompts to inject based on tool args and result context."""
+    prompts: list[str] = []
+
+    filename = args.get("filename", "")
+
+    if tool_name in ("write_file", "patch_file", "read_file"):
+        if filename.endswith(".tscn"):
+            prompts.append("tscn_format")
+        elif filename.endswith(".gd"):
+            prompts.append("godot4_basics")
+
+    # If list_assets found sprite sheets, inject sprite sheet guide
+    if tool_name == "list_assets" and "is_sprite_sheet" in tool_result:
+        prompts.append("sprite_sheet")
+
+    return prompts
+
+
+def _load_prompt_file(name: str) -> str | None:
+    """Load a prompt .md file by name. Returns content or None."""
+    prompt_path = Path(__file__).parent / "prompts" / f"{name}.md"
+    if prompt_path.exists():
+        try:
+            return prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+    return None
+
 # ─── System Prompt ───
 
 SYSTEM_PROMPT = """You are GodotVibe, an AI game development assistant for Godot 4.x.
@@ -372,8 +656,21 @@ Respond in the SAME LANGUAGE as the user.
 
 ## HOW YOU WORK:
 - **Chatting** (greetings, questions): Just reply with text, no tool calls
-- **Building/modifying**: Briefly acknowledge, call tools, then summarize
+- **Building/modifying**: Briefly acknowledge, call tools, then summarize what you changed and why
 - Tool-calling IS your intent detection — no separate classification needed
+
+## COMMUNICATION RULES (CRITICAL):
+- **ALWAYS talk to the user.** After making changes, you MUST explain what you did and why in natural language.
+- **Bug fix requests**: Address EACH bug the user mentioned. Explain what caused each bug and how you fixed it. Do NOT just say "all fixed" or "running perfectly" — be SPECIFIC.
+- **NEVER end with only tool calls.** Your LAST message in a conversation MUST contain a natural-language reply to the user explaining what was done.
+- If the user reported multiple issues, respond with a numbered list addressing each one.
+- If you attached images/screenshots showing bugs, acknowledge what you SEE in the images.
+
+## CONTEXT PRIORITY (CRITICAL):
+- **The user's CURRENT message is your #1 priority.** Always read it carefully and respond to exactly what it says.
+- Project memory and chat history are background reference — they may be OUTDATED. The user's current request may describe NEW issues not in memory.
+- **Do NOT confuse old issues with new ones.** If the user reports a new bug, don't respond about a previously fixed bug.
+- When in doubt, READ the actual project files to understand the current state — don't rely on memory alone.
 
 ## IMAGES & SCREENSHOTS:
 When the user sends images/screenshots:
@@ -403,6 +700,10 @@ When the user sends images/screenshots:
 6. **Answer the user's actual question.** Don't guess — read the relevant files first.
 7. **Be efficient with iterations.** If you changed files, keep fixing until validate passes with 0 errors. But if the task is simple (just answering a question, small tweak already done), respond and stop — don't waste iterations.
 
+## BUILT-IN GUIDES:
+- When you call tools, relevant Godot guides are automatically included in the result under `__guide__`. READ THEM — they contain critical syntax, patterns, and gotchas.
+- These guides are injected only once per topic per session, so pay attention when they appear.
+
 ## GODOT 4.x (NOT 3.x!):
 - GDScript uses TAB indentation
 - `CharacterBody2D` (not KinematicBody2D), `Node3D` (not Spatial), `@export` (not export), `@onready` (not onready)
@@ -411,23 +712,15 @@ When the user sends images/screenshots:
 - CollisionShape2D/3D MUST have a SubResource shape
 - .tscn format=3, root node has NO parent, children have parent="."
 
-## CharacterBody2D pattern:
-```gdscript
-extends CharacterBody2D
-const SPEED = 300.0
-const JUMP_VELOCITY = -400.0
-func _physics_process(delta: float) -> void:
-\tif not is_on_floor():
-\t\tvelocity += get_gravity() * delta
-\tif Input.is_action_just_pressed("ui_accept") and is_on_floor():
-\t\tvelocity.y = JUMP_VELOCITY
-\tvar direction := Input.get_axis("ui_left", "ui_right")
-\tif direction:
-\t\tvelocity.x = direction * SPEED
-\telse:
-\t\tvelocity.x = move_toward(velocity.x, 0, SPEED)
-\tmove_and_slide()
-```"""
+## ASSET LOADING (CRITICAL — EXPORT BREAKS OTHERWISE):
+- **ALWAYS** load assets via `load("res://...")` or `preload("res://...")`. These work in both editor AND exported builds.
+- **NEVER** use `Image.load()` with `ProjectSettings.globalize_path()`. This reads from the absolute disk path, which does NOT exist in exported builds (assets are packed inside .pck/.exe). The game will show blank squares instead of images.
+- **NEVER** create an "AssetLoader" that "bypasses the import system" with `Image.new()` + `img.load(abs_path)`. This is a guaranteed export-breaking pattern.
+- For sprite sheets: use `load("res://assets/sprite.png")` to get the texture, then set `hframes`/`vframes` on a `Sprite2D`.
+- For audio: use `load("res://assets/sound.ogg")` and assign to `AudioStreamPlayer.stream`.
+- Correct pattern: `var tex: Texture2D = load("res://assets/Foxy.png")` ← works everywhere
+- Wrong pattern: `var img = Image.new(); img.load(ProjectSettings.globalize_path("res://assets/Foxy.png"))` ← BREAKS on export
+"""
 
 
 # ─── Helper Functions ───
@@ -543,118 +836,6 @@ class AgentStep:
         }
 
 
-# ─── Cached API Knowledge (shared across all sessions, thread-safe) ───
-
-_api_knowledge_cache: str | None = None
-_api_knowledge_lock = threading.Lock()
-
-
-def _build_api_knowledge_cached() -> str:
-    """Build (or return cached) Godot 4.x API reference for system prompt injection.
-
-    Thread-safe: uses a lock so only the first caller builds the cache.
-    """
-    global _api_knowledge_cache
-    if _api_knowledge_cache is not None:
-        return _api_knowledge_cache
-
-    with _api_knowledge_lock:
-        # Double-check after acquiring lock
-        if _api_knowledge_cache is not None:
-            return _api_knowledge_cache
-
-        priority_classes = [
-            # Core
-            "Node", "Node2D", "Node3D", "Control", "SceneTree",
-            # 2D game
-            "Sprite2D", "AnimatedSprite2D", "CharacterBody2D", "RigidBody2D",
-            "StaticBody2D", "Area2D", "CollisionShape2D", "RayCast2D",
-            "Camera2D", "TileMapLayer", "Marker2D", "Line2D", "Path2D", "PathFollow2D",
-            "GPUParticles2D", "NavigationAgent2D",
-            # 3D game
-            "MeshInstance3D", "CharacterBody3D", "RigidBody3D", "StaticBody3D",
-            "Area3D", "CollisionShape3D", "Camera3D", "DirectionalLight3D",
-            "OmniLight3D", "SpotLight3D", "WorldEnvironment",
-            "NavigationAgent3D", "GPUParticles3D",
-            # Physics shapes
-            "RectangleShape2D", "CircleShape2D", "CapsuleShape2D",
-            "BoxShape3D", "SphereShape3D", "CapsuleShape3D",
-            # GUI
-            "Label", "Button", "TextureRect", "ColorRect", "Panel",
-            "VBoxContainer", "HBoxContainer", "MarginContainer", "CenterContainer",
-            "ProgressBar", "TextureButton", "RichTextLabel", "LineEdit",
-            # Animation/Audio
-            "AnimationPlayer", "AnimatedSprite2D", "Tween",
-            "AudioStreamPlayer", "AudioStreamPlayer2D", "AudioStreamPlayer3D",
-            "Timer",
-            # Resources
-            "PackedScene", "Texture2D", "AudioStream", "Font",
-            "StandardMaterial3D", "ShaderMaterial", "StyleBoxFlat",
-        ]
-
-        try:
-            from vibe_tools.api_parser import APIKnowledgeBase
-            kb: APIKnowledgeBase | None = None
-
-            cache_dir = Path(__file__).parent / "api_cache"
-            cache_files = list(cache_dir.glob("godot_api_*.json")) if cache_dir.exists() else []
-            if cache_files:
-                try:
-                    kb = APIKnowledgeBase.load_from_cache(str(cache_files[0]))
-                except Exception:
-                    pass
-
-            if kb is None:
-                doc_dir = Path(__file__).parent.parent / "doc" / "classes"
-                if doc_dir.exists():
-                    try:
-                        kb = APIKnowledgeBase.build_from_xml(str(doc_dir))
-                        cache_dir.mkdir(parents=True, exist_ok=True)
-                        kb.save_to_cache(str(cache_dir / "godot_api_4x.json"))
-                    except Exception as e:
-                        logger.warning("Failed to build API knowledge base: %s", e)
-
-            if kb is None:
-                _api_knowledge_cache = ""
-                return ""
-
-            lines: list[str] = ["## GODOT 4.x API QUICK REFERENCE\n"]
-            for cls_name in priority_classes:
-                if cls_name not in kb.classes:
-                    continue
-                cls = kb.classes[cls_name]
-                inherits = f" < {cls.inherits}" if cls.inherits else ""
-                lines.append(f"### {cls.name}{inherits}")
-                if cls.brief_description:
-                    lines.append(f"{cls.brief_description}")
-                if cls.properties:
-                    props = cls.properties[:10]
-                    prop_strs = [f"`{p.name}: {p.type}`" for p in props]
-                    lines.append(f"Props: {', '.join(prop_strs)}")
-                public_methods = [m for m in cls.methods if not m.name.startswith("_")]
-                if public_methods:
-                    meths = public_methods[:8]
-                    meth_strs = []
-                    for m in meths:
-                        params = ", ".join(f"{p.name}: {p.type}" for p in m.params)
-                        meth_strs.append(f"`{m.name}({params}) -> {m.return_type}`")
-                    lines.append(f"Methods: {', '.join(meth_strs)}")
-                if cls.signals:
-                    sigs = cls.signals[:5]
-                    sig_strs = [f"`{s.name}`" for s in sigs]
-                    lines.append(f"Signals: {', '.join(sig_strs)}")
-                lines.append("")
-
-            _api_knowledge_cache = "\n".join(lines)
-            logger.info("Built API knowledge reference: %d chars, %d classes",
-                       len(_api_knowledge_cache), len(priority_classes))
-            return _api_knowledge_cache
-
-        except Exception as e:
-            logger.warning("Failed to build API knowledge: %s", e)
-            _api_knowledge_cache = ""
-            return ""
-
 
 # ─── Chat History Store (shared, thread-safe) ───
 
@@ -684,9 +865,9 @@ class ChatHistoryStore:
             if key not in self._histories:
                 self._histories[key] = []
             self._histories[key].append(msg)
-            # Keep bounded (last 20)
-            if len(self._histories[key]) > 20:
-                del self._histories[key][:len(self._histories[key]) - 20]
+            # Keep bounded (last 10 — recent context is enough, too much old history confuses the LLM)
+            if len(self._histories[key]) > 10:
+                del self._histories[key][:len(self._histories[key]) - 10]
 
     def clear(self, project_dir: str | None = None) -> None:
         """Clear chat history for a specific project."""
@@ -732,6 +913,8 @@ class AgentSession:
         self._post_validation_count: int = 0
         self._has_validated: bool = False
         self._has_file_changes: bool = False
+        # Track which prompt guides have been injected (avoid duplicates)
+        self._injected_prompts: set[str] = set()
 
     def _get_runner(self):
         """Lazy-init GodotRunner."""
@@ -778,12 +961,6 @@ class AgentSession:
             logger.warning("Path traversal attempt blocked: %s", filename)
             return None
         return target
-
-    # ─── API Knowledge Injection ───
-
-    def _build_api_knowledge(self) -> str:
-        """Get the cached Godot API reference string."""
-        return _build_api_knowledge_cached()
 
     # ─── Tool Implementations ───
 
@@ -852,6 +1029,21 @@ class AgentSession:
         # 1. Structural validation (always run, doesn't need Godot exe)
         struct_errors = self._structural_validate(self._output_dir)
         errors.extend(struct_errors)
+
+        # 1.5 Check for export-breaking anti-patterns in GDScript files
+        for gd_file in project_path.rglob("*.gd"):
+            rel = str(gd_file.relative_to(project_path)).replace("\\", "/")
+            try:
+                content = gd_file.read_text(encoding="utf-8")
+                if "globalize_path" in content and "img.load" in content.lower():
+                    errors.append(
+                        f"{rel}: ⚠️ EXPORT-BREAKING PATTERN: Uses Image.load() with globalize_path(). "
+                        f"This reads from the absolute disk path which does NOT exist in exported builds! "
+                        f"Replace with: var tex = load(\"res://...\") to load textures. "
+                        f"NEVER use Image.new() + img.load(ProjectSettings.globalize_path(...))."
+                    )
+            except Exception:
+                pass
 
         # 2. Check each GDScript file for syntax/semantic errors
         script_results = {}
@@ -1140,13 +1332,29 @@ class AgentSession:
                 continue
             if f.suffix.lower() in ASSET_EXTENSIONS_ALL:
                 category = classify_asset(f.suffix)
-                assets.append({
+                asset_info: dict[str, Any] = {
                     "filename": f.name,
                     "path": rel,
                     "res_path": f"res://{rel}",
                     "category": category,
                     "size_bytes": f.stat().st_size,
-                })
+                }
+                # Analyze images for sprite sheet detection
+                if category == "image" and f.suffix.lower() in ASSET_EXTENSIONS_IMAGE:
+                    meta = _analyze_sprite_sheet(f)
+                    if meta:
+                        asset_info["width"] = meta["width"]
+                        asset_info["height"] = meta["height"]
+                        if meta.get("is_sheet"):
+                            asset_info["is_sprite_sheet"] = True
+                            asset_info["hframes"] = meta["hframes"]
+                            asset_info["vframes"] = meta["vframes"]
+                            asset_info["frame_width"] = meta["frame_width"]
+                            asset_info["frame_height"] = meta["frame_height"]
+                            asset_info["total_frames"] = meta["total_frames"]
+                            if meta.get("rows_info"):
+                                asset_info["animation_rows"] = meta["rows_info"]
+                assets.append(asset_info)
 
         if assets:
             # Build detailed usage instructions per category
@@ -1157,12 +1365,26 @@ class AgentSession:
             fonts = [a for a in assets if a["category"] == "font"]
             
             if images:
-                names = ", ".join(a["filename"] for a in images)
+                img_lines = []
+                for a in images:
+                    if a.get("is_sprite_sheet"):
+                        img_lines.append(
+                            f"  {a['filename']}: SPRITE SHEET ({a['width']}×{a['height']}px, "
+                            f"grid {a['hframes']}col × {a['vframes']}row, frame {a['frame_width']}×{a['frame_height']}px)\n"
+                            f"    → USE: Sprite2D(hframes={a['hframes']}, vframes={a['vframes']}) "
+                            f"OR AnimatedSprite2D + SpriteFrames + AtlasTexture(region=Rect2(col*{a['frame_width']}, row*{a['frame_height']}, {a['frame_width']}, {a['frame_height']}))\n"
+                            f"    ⚠️ DO NOT use as single texture!"
+                        )
+                        if a.get("animation_rows"):
+                            for ri in a["animation_rows"][:8]:
+                                img_lines.append(f"    Row {ri['row']} ({ri['frame_count']} frames): suggested \"{ri['suggested_name']}\"")
+                    else:
+                        w = a.get("width", "?")
+                        h = a.get("height", "?")
+                        img_lines.append(f"  {a['filename']}: Single image ({w}×{h}px)")
                 usage_hints.append(
-                    f"IMAGES ({len(images)}): {names}\n"
-                    f"  In GDScript: var tex = preload(\"{images[0]['res_path']}\")\n"
-                    f"  For Sprite2D: sprite.texture = preload(\"{images[0]['res_path']}\")\n"
-                    f"  For background: $Background.texture = preload(\"res://assets/background.png\")"
+                    f"IMAGES ({len(images)}):\n" + "\n".join(img_lines) + "\n"
+                    f"  preload usage: sprite.texture = preload(\"{images[0]['res_path']}\")"
                 )
             if audios:
                 names = ", ".join(a["filename"] for a in audios)
@@ -1205,11 +1427,13 @@ class AgentSession:
                 "message": "No asset files found. The user hasn't uploaded any images, audio, models, or fonts yet. Use ColorRect/primitives as placeholders."
             })
 
+
     # ─── Asset Helpers ───
 
     def _scan_assets_for_prompt(self) -> str | None:
         """Pre-scan project directory for assets and return a formatted string for system prompt injection.
-        This ensures the LLM knows about assets from the VERY FIRST message, not just after list_assets."""
+        This ensures the LLM knows about assets from the VERY FIRST message, not just after list_assets.
+        Includes sprite sheet analysis with frame grid metadata."""
         if not self._output_dir:
             return None
         project_path = Path(self._output_dir)
@@ -1225,7 +1449,13 @@ class AgentSession:
                 continue
             if f.suffix.lower() in ASSET_EXTENSIONS_ALL:
                 category = classify_asset(f.suffix)
-                assets.append({"filename": f.name, "res_path": f"res://{rel}", "category": category})
+                asset_entry: dict[str, Any] = {"filename": f.name, "res_path": f"res://{rel}", "category": category, "file_path": f}
+                # Analyze images for sprite sheet detection
+                if category == "image" and f.suffix.lower() in ASSET_EXTENSIONS_IMAGE:
+                    meta = _analyze_sprite_sheet(f)
+                    if meta:
+                        asset_entry["meta"] = meta
+                assets.append(asset_entry)
 
         if not assets:
             return None
@@ -1237,10 +1467,23 @@ class AgentSession:
         models = [a for a in assets if a["category"] == "model"]
 
         if images:
-            lines.append("### Images (use for Sprite2D.texture, TextureRect, backgrounds):")
+            lines.append("### Images:")
             for a in images:
+                meta = a.get("meta")
                 hint = ""
                 name_low = a["filename"].lower()
+
+                # Sprite sheet metadata takes priority
+                if meta and meta.get("is_sheet"):
+                    sheet_info = _format_sprite_sheet_info(meta, a["res_path"])
+                    lines.append(f"- `{a['res_path']}` → {sheet_info}")
+                    continue
+
+                # Single image hints
+                size_info = ""
+                if meta:
+                    size_info = f" ({meta['width']}×{meta['height']}px)"
+
                 if "player" in name_low or "hero" in name_low or "character" in name_low:
                     hint = " → PLAYER sprite"
                 elif "enemy" in name_low or "slime" in name_low or "monster" in name_low:
@@ -1251,7 +1494,7 @@ class AgentSession:
                     hint = " → BACKGROUND"
                 elif "foxy" in name_low or "fox" in name_low:
                     hint = " → CHARACTER sprite (Foxy)"
-                lines.append(f"- `{a['res_path']}`{hint}")
+                lines.append(f"- `{a['res_path']}`{size_info}{hint}")
             lines.append(f"  Usage: `sprite.texture = preload(\"{images[0]['res_path']}\")`")
 
         if audios:
@@ -1879,13 +2122,59 @@ class AgentSession:
     }
 
     def _execute_tool(self, tool_name: str, args: dict) -> str:
-        """Execute a tool by name and return the result."""
+        """Execute a tool by name and return the result, with auto-injected guides."""
         method_name = self.TOOL_MAP.get(tool_name)
         if not method_name:
             return json.dumps({"ok": False, "error": f"Unknown tool: {tool_name}"})
 
         method = getattr(self, method_name)
-        return method(args)
+        result = method(args)
+
+        # Auto-inject bound prompt guides into tool result
+        guides = self._collect_guides(tool_name, args, result)
+        if guides:
+            result = self._append_guides_to_result(result, guides)
+
+        return result
+
+    def _collect_guides(self, tool_name: str, args: dict, tool_result: str) -> dict[str, str]:
+        """Collect prompt guides to inject for this tool call (skip already-injected)."""
+        prompt_names: list[str] = []
+
+        # Static bindings
+        prompt_names.extend(TOOL_PROMPTS.get(tool_name, []))
+
+        # Dynamic bindings based on args/result
+        prompt_names.extend(_get_dynamic_prompts(tool_name, args, tool_result))
+
+        # Deduplicate and skip already-injected
+        guides: dict[str, str] = {}
+        for name in prompt_names:
+            if name in self._injected_prompts:
+                continue
+            content = _load_prompt_file(name)
+            if content:
+                guides[name] = content
+                self._injected_prompts.add(name)
+
+        return guides
+
+    def _append_guides_to_result(self, result: str, guides: dict[str, str]) -> str:
+        """Append guide content to tool result JSON under __guide__ key."""
+        try:
+            data = json.loads(result)
+            # Build a single guide block with all guides concatenated
+            guide_text = "\n\n".join(
+                f"--- {name} ---\n{content}" for name, content in guides.items()
+            )
+            data["__guide__"] = guide_text
+            return json.dumps(data)
+        except (json.JSONDecodeError, TypeError):
+            # If result isn't JSON, append as text
+            guide_block = "\n\n__GUIDE__:\n" + "\n\n".join(
+                f"--- {name} ---\n{content}" for name, content in guides.items()
+            )
+            return result + guide_block
 
     # ─── Agent Loop ───
 
@@ -1941,45 +2230,66 @@ class AgentSession:
         # Pre-scan assets and inject into system prompt so LLM ALWAYS knows about them
         asset_inventory = self._scan_assets_for_prompt()
 
-        # Build API knowledge reference
-        api_ref = self._build_api_knowledge()
-
-        # Build initial messages
+        # Build initial messages — system prompt is lean; guides are auto-injected into tool results
         system_content = SYSTEM_PROMPT
-        if api_ref:
-            system_content += f"\n\n{api_ref}"
         if asset_inventory:
-            system_content += f"\n\n## ⚠️ USER-UPLOADED ASSETS (ALREADY IN PROJECT DIRECTORY):\n\n{asset_inventory}\n\n**YOU MUST USE EVERY SINGLE ASSET LISTED ABOVE.** Do NOT use ColorRect or placeholder graphics. This is NON-NEGOTIABLE."
+            system_content += f"\n\n## USER-UPLOADED ASSETS (ALREADY IN PROJECT DIRECTORY):\n\n{asset_inventory}\n\n**YOU MUST USE EVERY SINGLE ASSET LISTED ABOVE.** Do NOT use ColorRect or placeholder graphics."
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_content},
         ]
 
-        # Add memory context if available
+        # Add memory context if available (marked as background — current request takes priority)
         if memory_content:
             messages.append({
                 "role": "system",
-                "content": f"## PROJECT MEMORY (from previous sessions):\n\n{memory_content}\n\n---\nUse this memory to understand the current state of the project. Update it with `update_memory` after making changes."
+                "content": (
+                    "## PROJECT MEMORY (background reference only):\n\n"
+                    f"{memory_content}\n\n"
+                    "---\n"
+                    "⚠️ This memory is from PREVIOUS sessions. It describes the project's general state.\n"
+                    "The user's CURRENT message below is what you must focus on — it may describe NEW issues "
+                    "that are NOT mentioned in this memory. Do NOT assume the memory is up-to-date.\n"
+                    "After making changes, update memory with `update_memory`."
+                )
             })
 
         # Inject chat history for multi-turn context (project-isolated)
+        # Keep budget small to avoid old conversations overshadowing the current request
         chat_history = self._chat_store.get(output_dir)
         if chat_history:
-            history_budget = 15_000  # ~15K tokens for history
+            history_budget = 6_000  # ~6K tokens — enough for recent context, not so much it dominates
             history_tokens = 0
             history_to_add = []
             for msg in reversed(chat_history):
-                msg_tokens = _estimate_tokens(msg.get("content", "") if isinstance(msg.get("content"), str) else str(msg.get("content", "")))
+                content = msg.get("content", "") if isinstance(msg.get("content"), str) else str(msg.get("content", ""))
+                # Strip verbose tool action logs from history — they bloat context with stale details
+                if "[Actions:" in content or "[Tool actions:" in content:
+                    content = content.split("[Actions:")[0].split("[Tool actions:")[0].strip()
+                    if not content:
+                        continue  # Skip entries that were only tool action logs
+                msg_tokens = _estimate_tokens(content)
                 if history_tokens + msg_tokens > history_budget:
                     break
                 history_to_add.insert(0, msg)
                 history_tokens += msg_tokens
-            for msg in history_to_add:
-                messages.append(msg)
+
+            if history_to_add:
+                # Add a separator so LLM knows this is old context
+                messages.append({
+                    "role": "system",
+                    "content": "## PREVIOUS CONVERSATION (for reference — the user's CURRENT request below may be about a completely different topic):"
+                })
+                for msg in history_to_add:
+                    messages.append(msg)
+                messages.append({
+                    "role": "system",
+                    "content": "## END OF PREVIOUS CONVERSATION. Now focus on the user's NEW request below:"
+                })
 
         if is_existing:
             project_name = Path(output_dir).name
-            text_content = f"[Project: {project_name}]\n{user_prompt}"
+            text_content = f"[Project: {project_name}]\n\n[CURRENT REQUEST — this is what you must address NOW]:\n{user_prompt}"
         else:
             text_content = user_prompt
 
@@ -2166,11 +2476,7 @@ class AgentSession:
                                 "is_existing": is_existing,
                             }
                             self._chat_store.append(output_dir, {"role": "user", "content": user_prompt})
-                            tool_summary = self._build_tool_summary()
-                            if tool_summary:
-                                self._chat_store.append(output_dir, {"role": "assistant", "content": f"{content_text}\n\n[Tool actions: {tool_summary}]"})
-                            else:
-                                self._chat_store.append(output_dir, {"role": "assistant", "content": content_text})
+                            self._chat_store.append(output_dir, {"role": "assistant", "content": content_text})
                             if self._project_generated and self._output_dir:
                                 result["files"] = self._collect_project_files()
                                 proj_info = self._build_project_info()
@@ -2312,8 +2618,8 @@ class AgentSession:
                         msg_dict.pop("content", None)
                     fix_messages.append(msg_dict)
 
-                    if message.content and message.content.strip():
-                        agent_reply = message.content.strip()
+                    # Don't overwrite agent_reply with fix-loop intermediate messages
+                    # (the final summary reply will be generated post-loop if needed)
 
                     if message.tool_calls:
                         for tool_call in message.tool_calls:
@@ -2362,18 +2668,56 @@ class AgentSession:
                     self._add_step("error", f"Final validation error: {e}")
                     logger.error(f"Final validation error: {e}", exc_info=True)
 
+        # ── Ensure agent provides a meaningful reply to the user ──
+        # If file changes were made but agent_reply is empty/generic, force a summary reply
+        if self._has_file_changes and is_existing:
+            needs_reply = (
+                not agent_reply
+                or len(agent_reply) < 30
+                or agent_reply.lower().startswith(("all running", "all done", "all good", "everything"))
+            )
+            if needs_reply:
+                self._add_step("thinking", "Generating summary reply for the user...")
+                try:
+                    tool_summary = self._build_tool_summary()
+                    summary_messages = [
+                        {"role": "system", "content": (
+                            "You are GodotVibe. The user asked you to fix bugs or modify their Godot project. "
+                            "You have already made the changes using tools. Now write a BRIEF reply to the user "
+                            "explaining what you changed and why. Address each issue the user mentioned. "
+                            "Respond in the SAME LANGUAGE as the user. Be specific — mention file names, "
+                            "what the bug was, and how you fixed it. Do NOT just say 'all fixed'."
+                        )},
+                        {"role": "user", "content": (
+                            f"User's original request:\n{user_prompt}\n\n"
+                            f"Actions I took:\n{tool_summary or 'Various file modifications'}\n\n"
+                            f"Validation result: {'PASSED' if final_validation_ok else 'FAILED'}\n\n"
+                            f"Write a reply to the user summarizing what was done."
+                        )},
+                    ]
+                    summary_response = self.llm.invoke(summary_messages, temperature=0.3, max_tokens=2048)
+                    if summary_response and summary_response.strip():
+                        agent_reply = summary_response.strip()
+                except Exception as e:
+                    logger.error(f"Failed to generate summary reply: {e}")
+                    # Fall back to a basic summary
+                    if not agent_reply:
+                        tool_summary = self._build_tool_summary()
+                        agent_reply = f"Changes applied. {tool_summary}" if tool_summary else "Changes applied."
+
         # Collect final files
         files = self._collect_project_files()
 
         # Save to project-isolated chat history
+        # Only store the conversational reply — NOT tool action logs (they pollute future context)
         self._chat_store.append(output_dir, {"role": "user", "content": user_prompt})
-        tool_summary = self._build_tool_summary()
-        if agent_reply and tool_summary:
-            self._chat_store.append(output_dir, {"role": "assistant", "content": f"{agent_reply}\n\n[Actions: {tool_summary}]"})
-        elif agent_reply:
+        if agent_reply:
             self._chat_store.append(output_dir, {"role": "assistant", "content": agent_reply})
-        elif tool_summary:
-            self._chat_store.append(output_dir, {"role": "assistant", "content": f"[Actions: {tool_summary}]"})
+        else:
+            # If no reply was generated, store a brief summary so history isn't empty
+            tool_summary = self._build_tool_summary()
+            if tool_summary:
+                self._chat_store.append(output_dir, {"role": "assistant", "content": f"[Made changes: {tool_summary[:200]}]"})
 
         # Build result
         final_result: dict[str, Any] = {
