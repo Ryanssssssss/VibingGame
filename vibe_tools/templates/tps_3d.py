@@ -108,6 +108,7 @@ const MOUSE_SENSITIVITY = 0.003
 const GRAVITY = 9.8
 
 @onready var camera_pivot: Node3D = $CameraPivot
+@onready var player_model: Node3D = $PlayerModel
 
 func _ready() -> void:
 \tInput.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -130,6 +131,7 @@ func _physics_process(delta: float) -> void:
 \tif Input.is_action_just_pressed("ui_accept") and is_on_floor():
 \t\tvelocity.y = JUMP_VELOCITY
 
+\t# Movement direction relative to CAMERA, not player body
 \tvar input_dir := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 \tvar cam_basis := camera_pivot.global_transform.basis
 \tvar direction := (cam_basis * Vector3(input_dir.x, 0, input_dir.y)).normalized()
@@ -138,9 +140,9 @@ func _physics_process(delta: float) -> void:
 \tif direction:
 \t\tvelocity.x = direction.x * SPEED
 \t\tvelocity.z = direction.z * SPEED
-\t\t# Rotate player to face movement direction
+\t\t# Rotate only the model to face movement direction (NOT the whole body)
 \t\tvar target_angle := atan2(direction.x, direction.z)
-\t\trotation.y = lerp_angle(rotation.y, target_angle, 0.15)
+\t\tplayer_model.rotation.y = lerp_angle(player_model.rotation.y, target_angle, 0.15)
 \telse:
 \t\tvelocity.x = move_toward(velocity.x, 0, SPEED)
 \t\tvelocity.z = move_toward(velocity.z, 0, SPEED)

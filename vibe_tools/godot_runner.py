@@ -99,14 +99,55 @@ class GodotRunner:
             logger.error("Failed to open Godot editor for %s", project_dir, exc_info=True)
             return None
 
+    def import_resources(self, project_dir: str, timeout: int = 60) -> bool:
+        """Run ``--headless --import`` so Godot converts assets (GLB, images …).
+
+        Returns True on success, False on failure.  This is idempotent –
+        calling it when the ``.godot/imported/`` cache already exists is a
+        fast no-op inside Godot.
+        """
+        if not self.is_available():
+            return False
+        project_path = Path(project_dir)
+        if not (project_path / "project.godot").exists():
+            return False
+        try:
+            result = subprocess.run(
+                [str(self._exe), "--path", str(project_path), "--headless", "--import"],
+                capture_output=True,
+                timeout=timeout,
+                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    "Godot --import returned %d for %s:\n%s",
+                    result.returncode, project_dir,
+                    result.stderr.decode("utf-8", errors="replace")[-2000:],
+                )
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            logger.warning("Godot --import timed out for %s", project_dir)
+            return False
+        except Exception:
+            logger.error("Failed to import resources for %s", project_dir, exc_info=True)
+            return False
+
     def run_project(self, project_dir: str) -> subprocess.Popen | None:
-        """Run a project directly (game mode, not editor)."""
+        """Run a project directly (game mode, not editor).
+
+        Automatically runs ``--import`` first to ensure assets like GLB
+        models are available in the ``.godot/imported/`` cache.
+        """
         if not self.is_available():
             return None
         project_path = Path(project_dir)
         if not (project_path / "project.godot").exists():
             logger.warning("Cannot run project: project.godot not found in %s", project_dir)
             return None
+
+        # Ensure resources are imported (GLB, textures, etc.)
+        self.import_resources(project_dir)
+
         try:
             proc = subprocess.Popen(
                 [str(self._exe), "--path", str(project_path)],

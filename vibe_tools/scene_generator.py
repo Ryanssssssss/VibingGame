@@ -99,15 +99,28 @@ class SceneWriter:
 
     def _collect_nodes(self, node: NodeDesc, *, is_root: bool, parent_path: str) -> None:
         """Recursively collect node definitions."""
-        # Header
-        parts: list[str] = [f'[node name="{node.name}" type="{node.type}"']
-        if not is_root:
-            parts.append(f' parent="{parent_path}"')
-        if node.groups:
-            groups_str = ", ".join(f'"{g}"' for g in node.groups)
-            parts.append(f" groups=[{groups_str}]")
-        header = "".join(parts) + "]"
-        self._node_lines.append(header)
+        # If this node instances a PackedScene (.glb, .tscn, etc.)
+        if node.instance:
+            instance_id = self.add_ext_resource("PackedScene", node.instance)
+            parts: list[str] = [f'[node name="{node.name}"']
+            if not is_root:
+                parts.append(f' parent="{parent_path}"')
+            parts.append(f' instance=ExtResource("{instance_id}")')
+            if node.groups:
+                groups_str = ", ".join(f'"{g}"' for g in node.groups)
+                parts.append(f" groups=[{groups_str}]")
+            header = "".join(parts) + "]"
+            self._node_lines.append(header)
+        else:
+            # Normal node with explicit type
+            parts = [f'[node name="{node.name}" type="{node.type}"']
+            if not is_root:
+                parts.append(f' parent="{parent_path}"')
+            if node.groups:
+                groups_str = ", ".join(f'"{g}"' for g in node.groups)
+                parts.append(f" groups=[{groups_str}]")
+            header = "".join(parts) + "]"
+            self._node_lines.append(header)
 
         # Script attachment
         if node.script:
@@ -120,13 +133,24 @@ class SceneWriter:
 
         self._node_lines.append("")  # blank separator
 
-        # Children — compute parent_path correctly for arbitrary nesting depth
-        for child in node.children:
-            if is_root:
-                child_parent = "."
-            else:
-                child_parent = f"{parent_path}/{node.name}" if parent_path != "." else node.name
-            self._collect_nodes(child, is_root=False, parent_path=child_parent)
+        # Children — but SKIP if this is an instanced node (instance + children is invalid in .tscn)
+        # Instanced nodes already contain their own subtree from the PackedScene.
+        if node.instance and node.children:
+            # Log warning — the LLM shouldn't have put children on an instanced node
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Node '%s' has both 'instance' and 'children'. "
+                "Children are IGNORED for instanced nodes in .tscn. "
+                "To add children, use a wrapper parent node instead.",
+                node.name,
+            )
+        elif node.children:
+            for child in node.children:
+                if is_root:
+                    child_parent = "."
+                else:
+                    child_parent = f"{parent_path}/{node.name}" if parent_path != "." else node.name
+                self._collect_nodes(child, is_root=False, parent_path=child_parent)
 
     def _build_output(self) -> str:
         """Build the final .tscn file content."""

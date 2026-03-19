@@ -12,8 +12,11 @@ Uses SimpleLLMProvider from llm_transfer.py (OpenAI-compatible format with tool 
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
+import os
 import re
 import threading
 from pathlib import Path
@@ -22,7 +25,7 @@ from typing import Any
 from vibe_tools.llm_transfer import SimpleLLMProvider
 from vibe_tools.models import (
     ASSET_EXTENSIONS_ALL, IGNORED_DIRS, PROJECT_SOURCE_EXTENSIONS,
-    ASSET_EXTENSIONS_IMAGE,
+    ASSET_EXTENSIONS_IMAGE, ASSET_EXTENSIONS_MODEL,
     classify_asset, is_ignored_path,
     ProjectPlan, ProjectSettings, GameType, SceneDesc, ScriptDesc,
     NodeDesc, ExportVar, OnReadyVar, FunctionDesc, InputEvent,
@@ -31,12 +34,64 @@ from vibe_tools.models import (
 
 logger = logging.getLogger(__name__)
 
+# Vision / image-understanding model — used for ALL image analysis (sprite sheets, user screenshots, etc.)
+# The main Agent (Claude Opus) NEVER receives raw images; this model describes them as text first.
+VISION_MODEL = "gemini-2.5-flash"
+
+
+# ─── Image Vision Analysis ───
+
+def _analyze_image_with_vision(
+    image_data: str,
+    prompt: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Use Gemini Flash to analyze a single image with a custom prompt.
+
+    The main Agent calls this via the `analyze_image` tool, controlling *what*
+    to look for in the image (e.g. "describe the UI layout", "read the error
+    message", "what sprites are in this sheet?").
+
+    Args:
+        image_data: base64 data URI string (e.g. "data:image/png;base64,...")
+        prompt: the analysis instruction — what the Agent wants to know about the image
+        api_key: LLM API key (falls back to env vars)
+        base_url: LLM base URL (falls back to env vars)
+
+    Returns:
+        Text description / analysis result. On failure, a fallback error message.
+    """
+    effective_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
+    effective_url = base_url or os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL")
+
+    if not effective_key:
+        return "[Vision analysis unavailable — no API key configured]"
+
+    llm = SimpleLLMProvider(model=VISION_MODEL, api_key=effective_key, base_url=effective_url)
+
+    try:
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_data}},
+            ],
+        }]
+        response = llm.invoke(messages, temperature=0.2, max_tokens=2048)
+        if response and response.strip():
+            return response.strip()
+        return "[Vision API returned empty response]"
+    except Exception as e:
+        logger.debug("Vision analysis failed: %s", e)
+        return f"[Vision analysis failed: {e}]"
+
 
 # ─── Sprite Sheet Analyzer ───
 
 def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
     """Analyze an image to detect if it's a sprite sheet and extract grid metadata.
-    
+
     Uses Pillow to read image dimensions, then analyzes transparency patterns
     to detect frame grid layout. Returns metadata dict or None if not a sprite sheet.
     """
@@ -62,6 +117,7 @@ def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
                 "height": height,
                 "format": fmt,
                 "is_sheet": False,
+                "detection_method": "none",
             }
 
             if has_alpha:
@@ -71,6 +127,7 @@ def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
                 if grid:
                     result.update(grid)
                     result["is_sheet"] = True
+                    result["detection_method"] = "alpha_scan"
                     return result
 
             # Fallback: dimension-based heuristic for common sprite sheet sizes
@@ -78,6 +135,7 @@ def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
             if grid:
                 result.update(grid)
                 result["is_sheet"] = True
+                result["detection_method"] = "dimension_guess"
 
             return result
     except Exception as e:
@@ -87,25 +145,27 @@ def _analyze_sprite_sheet(file_path: Path) -> dict[str, Any] | None:
 
 def _detect_grid_from_alpha(rgba_img: Any, width: int, height: int) -> dict[str, Any] | None:
     """Detect sprite sheet grid by scanning for transparent separator rows/columns.
-    Uses pure Pillow (no numpy dependency)."""
+    Uses Pillow batch operations for performance."""
     try:
-        alpha_data = list(rgba_img.split()[3].getdata())  # Extract alpha channel
+        alpha_band = rgba_img.split()[3]
+        alpha_bytes = alpha_band.tobytes()
     except Exception:
         return None
 
-    # Build row and column alpha sums
+    # Build row and column alpha sums using fast byte iteration
     row_alpha_sum = [0] * height
     col_alpha_sum = [0] * width
+    idx = 0
     for y in range(height):
-        row_start = y * width
         for x in range(width):
-            a = alpha_data[row_start + x]
+            a = alpha_bytes[idx]
             row_alpha_sum[y] += a
             col_alpha_sum[x] += a
+            idx += 1
 
-    # Threshold: a row/col is "empty" if its total alpha is very low
-    row_threshold = width * 2   # Nearly fully transparent
-    col_threshold = height * 2
+    # Adaptive threshold: a row/col is "empty" if its average alpha < 5 (out of 255)
+    row_threshold = width * 5
+    col_threshold = height * 5
 
     empty_rows = [i for i in range(height) if row_alpha_sum[i] <= row_threshold]
     empty_cols = [i for i in range(width) if col_alpha_sum[i] <= col_threshold]
@@ -137,8 +197,8 @@ def _detect_grid_from_alpha(rgba_img: Any, width: int, height: int) -> dict[str,
     if hframes <= 1 and vframes <= 1:
         return None
 
-    # Count non-empty frames per row for animation detection
-    rows_info = _detect_animation_rows(alpha_data, width, hframes, vframes, frame_w, frame_h)
+    # Count non-empty frames per row
+    rows_info = _detect_animation_rows(alpha_bytes, width, hframes, vframes, frame_w, frame_h)
 
     return {
         "hframes": hframes,
@@ -173,25 +233,27 @@ def _find_boundaries(empty_indices: list[int], total_size: int) -> list[int]:
     return sorted(set(boundaries))
 
 
-def _detect_animation_rows(alpha_data: list[int], img_width: int,
+def _detect_animation_rows(alpha_bytes: bytes, img_width: int,
                            hframes: int, vframes: int,
                            frame_w: int, frame_h: int) -> list[dict[str, Any]]:
-    """Detect how many non-empty frames are in each row (for animation labeling).
-    Uses flat alpha_data list from Pillow (no numpy)."""
+    """Detect how many non-empty frames are in each row.
+    Uses sampling (every 4th pixel) instead of scanning every pixel for performance.
+    Does NOT guess animation names — names come from LLM vision analysis later."""
     rows_info = []
-    common_anim_names = ["idle", "run", "walk", "jump", "fall", "attack", "hurt", "die", "climb", "swim"]
+    total_pixels = len(alpha_bytes)
+    sample_step = max(1, min(4, frame_w // 8))  # Sample every Nth pixel, at least every 4th
 
     for row in range(vframes):
         y_start = row * frame_h
         non_empty = 0
         for col in range(hframes):
             x_start = col * frame_w
-            # Check if any pixel in this frame has alpha > 0
             frame_has_content = False
-            for y in range(y_start, min(y_start + frame_h, len(alpha_data) // img_width)):
+            for y in range(y_start, min(y_start + frame_h, total_pixels // img_width), sample_step):
                 row_offset = y * img_width
-                for x in range(x_start, min(x_start + frame_w, img_width)):
-                    if row_offset + x < len(alpha_data) and alpha_data[row_offset + x] > 0:
+                for x in range(x_start, min(x_start + frame_w, img_width), sample_step):
+                    pix_idx = row_offset + x
+                    if pix_idx < total_pixels and alpha_bytes[pix_idx] > 10:
                         frame_has_content = True
                         break
                 if frame_has_content:
@@ -200,44 +262,190 @@ def _detect_animation_rows(alpha_data: list[int], img_width: int,
                 non_empty += 1
 
         if non_empty > 0:
-            anim_name = common_anim_names[row] if row < len(common_anim_names) else f"anim_{row}"
             rows_info.append({
                 "row": row,
                 "frame_count": non_empty,
-                "suggested_name": anim_name,
+                "suggested_name": f"row_{row}",  # Placeholder — will be replaced by LLM vision
             })
 
     return rows_info
 
 
-def _guess_grid_from_dimensions(width: int, height: int) -> dict[str, Any] | None:
-    """Fallback: guess grid layout from image dimensions using common frame sizes."""
-    # Common frame sizes in pixel art
-    common_sizes = [16, 24, 32, 48, 64, 96, 128]
+def _analyze_sprite_rows_with_vision(file_path: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    """Use Gemini Flash vision API to identify what animation each row of a sprite sheet represents.
 
-    best = None
+    Sends the full sprite sheet image to the LLM with a structured prompt asking it to
+    identify each row's animation. Updates meta['rows_info'] with real names.
+    Falls back to generic names (row_0, row_1...) on failure.
+    """
+    rows_info = meta.get("rows_info", [])
+    if not rows_info:
+        return meta
+
+    # Build the LLM API client using environment variables
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL")
+    if not api_key:
+        logger.debug("No API key available for vision analysis — using generic row names")
+        return meta
+
+    try:
+        from PIL import Image
+
+        # Encode the full sprite sheet as base64 JPEG (smaller than PNG for API)
+        with Image.open(file_path) as img:
+            # If image is very large, resize for the API call
+            max_dim = 1024
+            if img.width > max_dim or img.height > max_dim:
+                ratio = min(max_dim / img.width, max_dim / img.height)
+                new_size = (int(img.width * ratio), int(img.height * ratio))
+                img = img.resize(new_size, Image.Resampling.NEAREST)
+
+            # Convert to RGB for JPEG (drop alpha for smaller size)
+            rgb_img = img.convert("RGB") if img.mode != "RGB" else img
+            buf = io.BytesIO()
+            rgb_img.save(buf, format="PNG")
+            img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+        vframes = meta.get("vframes", len(rows_info))
+        hframes = meta.get("hframes", 1)
+        frame_w = meta.get("frame_width", "?")
+        frame_h = meta.get("frame_height", "?")
+
+        row_desc_lines = []
+        for ri in rows_info:
+            row_desc_lines.append(f"Row {ri['row']}: {ri['frame_count']} frames")
+
+        prompt = (
+            f"This is a sprite sheet image for a 2D game character/object.\n"
+            f"Grid: {hframes} columns × {vframes} rows, each frame is {frame_w}×{frame_h}px.\n"
+            f"Rows with content:\n" + "\n".join(row_desc_lines) + "\n\n"
+            f"For EACH row listed above, identify what animation/action it shows "
+            f"(e.g., idle, walk, run, jump, fall, attack, hurt, die, climb, swim, shoot, dash, crouch, etc.).\n\n"
+            f"Reply ONLY with a JSON array, one object per row, in this exact format:\n"
+            f'[{{"row": 0, "name": "idle"}}, {{"row": 1, "name": "run"}}]\n'
+            f"Use short lowercase snake_case names. If you can't tell, use \"unknown_N\"."
+        )
+
+        # Use the lightweight flash model for this quick vision task
+        llm = SimpleLLMProvider(model=VISION_MODEL, api_key=api_key, base_url=base_url)
+
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+            ],
+        }]
+
+        response = llm.invoke(messages, temperature=0.1, max_tokens=512)
+        if not response:
+            logger.debug("Vision API returned empty response for sprite sheet analysis")
+            return meta
+
+        # Parse the JSON response
+        # Strip markdown code fences if present
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        vision_rows = json.loads(cleaned)
+        if not isinstance(vision_rows, list):
+            logger.debug("Vision API returned non-list: %s", type(vision_rows))
+            return meta
+
+        # Build a mapping: row number → name
+        row_name_map: dict[int, str] = {}
+        for item in vision_rows:
+            if isinstance(item, dict) and "row" in item and "name" in item:
+                row_name_map[int(item["row"])] = str(item["name"]).strip().lower().replace(" ", "_")
+
+        # Update rows_info with vision-identified names
+        for ri in rows_info:
+            row_num = ri["row"]
+            if row_num in row_name_map:
+                ri["suggested_name"] = row_name_map[row_num]
+                ri["name_source"] = "vision_ai"
+            else:
+                ri["name_source"] = "generic"
+
+        meta["rows_info"] = rows_info
+        meta["vision_analyzed"] = True
+        logger.info("Vision API identified sprite row animations: %s",
+                     {ri["row"]: ri["suggested_name"] for ri in rows_info})
+
+    except json.JSONDecodeError as e:
+        logger.debug("Failed to parse vision API response as JSON: %s", e)
+    except ImportError:
+        logger.debug("Pillow not available for vision analysis")
+    except Exception as e:
+        logger.debug("Vision analysis failed for sprite sheet %s: %s", file_path, e)
+
+    return meta
+
+
+def _guess_grid_from_dimensions(width: int, height: int) -> dict[str, Any] | None:
+    """Fallback: guess grid layout from image dimensions using common frame sizes.
+    Supports both square and non-square frames."""
+    # Common frame sizes (width, height) — includes non-square
+    common_square = [16, 24, 32, 48, 64, 96, 128, 256]
+    common_rect = [(32, 48), (48, 64), (64, 96), (32, 64), (48, 32), (64, 48), (96, 64)]
+
+    best: dict[str, Any] | None = None
     best_score = 0
 
-    for fs in common_sizes:
+    # Try square frames
+    for fs in common_square:
         if width % fs == 0 and height % fs == 0:
             h = width // fs
             v = height // fs
-            if h >= 2 or v >= 2:  # At least 2 frames in one dimension
-                score = h * v  # Prefer more frames
+            if h >= 2 or v >= 2:
+                score = h * v
                 if h >= 2 and v >= 2:
-                    score *= 2  # Bonus for grid in both dimensions
+                    score *= 2
                 if score > best_score:
                     best_score = score
-                    best = {"hframes": h, "vframes": v, "frame_width": fs, "frame_height": fs, "total_frames": h * v, "rows_info": []}
+                    best = {"hframes": h, "vframes": v, "frame_width": fs, "frame_height": fs,
+                            "total_frames": h * v, "rows_info": []}
 
-    # Also try non-square frames: wide sprite sheets (width >> height)
+    # Try non-square frames
+    for fw, fh in common_rect:
+        if width % fw == 0 and height % fh == 0:
+            h = width // fw
+            v = height // fh
+            if h >= 2 or v >= 2:
+                score = h * v
+                if h >= 2 and v >= 2:
+                    score *= 2
+                # Slight preference for frames with reasonable aspect ratio
+                aspect = max(fw, fh) / min(fw, fh)
+                if aspect <= 2.0:
+                    score = int(score * 1.5)
+                if score > best_score:
+                    best_score = score
+                    best = {"hframes": h, "vframes": v, "frame_width": fw, "frame_height": fh,
+                            "total_frames": h * v, "rows_info": []}
+
+    # Single-row sprite strip (width >> height)
     if best is None and width > height * 2:
-        # Likely a single-row sprite strip
-        for fs in common_sizes:
+        for fs in common_square:
             if height <= fs * 1.5 and width % fs == 0:
                 h = width // fs
                 if h >= 2:
-                    best = {"hframes": h, "vframes": 1, "frame_width": fs, "frame_height": height, "total_frames": h, "rows_info": []}
+                    best = {"hframes": h, "vframes": 1, "frame_width": fs, "frame_height": height,
+                            "total_frames": h, "rows_info": []}
+                    break
+
+    # Single-column sprite strip (height >> width)
+    if best is None and height > width * 2:
+        for fs in common_square:
+            if width <= fs * 1.5 and height % fs == 0:
+                v = height // fs
+                if v >= 2:
+                    best = {"hframes": 1, "vframes": v, "frame_width": width, "frame_height": fs,
+                            "total_frames": v, "rows_info": []}
                     break
 
     return best
@@ -255,18 +463,177 @@ def _format_sprite_sheet_info(meta: dict[str, Any], res_path: str) -> str:
     fw = meta["frame_width"]
     fh = meta["frame_height"]
 
-    lines = [f"SPRITE SHEET ({w}×{h}px, grid {hf}×{vf}, frame {fw}×{fh}px)"]
+    detection = meta.get("detection_method", "unknown")
+    confidence = "high" if detection == "alpha_scan" else "low (dimension guess)"
+    vision = meta.get("vision_analyzed", False)
+
+    lines = [f"SPRITE SHEET ({w}×{h}px, grid {hf}×{vf}, frame {fw}×{fh}px, detection: {confidence})"]
 
     rows_info = meta.get("rows_info", [])
     if rows_info:
         for ri in rows_info[:8]:  # Max 8 rows shown
-            lines.append(f"  Row {ri['row']} ({ri['frame_count']} frames): suggested \"{ri['suggested_name']}\"")
+            source_tag = ""
+            if ri.get("name_source") == "vision_ai":
+                source_tag = " [AI-identified]"
+            elif ri.get("name_source") == "generic":
+                source_tag = " [unidentified]"
+            lines.append(f"  Row {ri['row']} ({ri['frame_count']} frames): \"{ri['suggested_name']}\"{source_tag}")
+
+    if not vision:
+        lines.append(f"  ⚠️ Animation names are auto-detected and MAY BE WRONG — verify with the user if unsure")
 
     lines.append(f"  USE Sprite2D: hframes={hf}, vframes={vf}, frame=N")
     lines.append(f"  OR AnimatedSprite2D + SpriteFrames + AtlasTexture(region=Rect2(col*{fw}, row*{fh}, {fw}, {fh}))")
     lines.append(f"  ⚠️ DO NOT use this as a single texture — it will display the ENTIRE sheet!")
 
     return "\n".join(lines)
+
+
+# ─── 3D Model Analyzer ───
+
+def _analyze_3d_model(file_path: Path) -> dict[str, Any] | None:
+    """Analyze a .glb/.gltf file to extract metadata: meshes, animations, materials, vertex count.
+
+    Uses pygltflib to parse the file. Returns metadata dict or None on failure.
+    """
+    suffix = file_path.suffix.lower()
+    if suffix not in (".glb", ".gltf"):
+        return None
+
+    try:
+        from pygltflib import GLTF2
+    except ImportError:
+        logger.debug("pygltflib not installed — skipping 3D model analysis")
+        return None
+
+    try:
+        gltf = GLTF2().load(str(file_path))
+
+        result: dict[str, Any] = {
+            "format": "GLB" if suffix == ".glb" else "glTF",
+        }
+
+        # Meshes
+        mesh_names: list[str] = []
+        total_primitives = 0
+        if gltf.meshes:
+            for mesh in gltf.meshes:
+                mesh_names.append(mesh.name or f"Mesh_{len(mesh_names)}")
+                if mesh.primitives:
+                    total_primitives += len(mesh.primitives)
+        result["meshes"] = mesh_names
+        result["mesh_count"] = len(mesh_names)
+        result["primitive_count"] = total_primitives
+
+        # Approximate vertex count from accessors
+        total_vertices = 0
+        if gltf.meshes and gltf.accessors:
+            for mesh in gltf.meshes:
+                if mesh.primitives:
+                    for prim in mesh.primitives:
+                        if prim.attributes and hasattr(prim.attributes, "POSITION") and prim.attributes.POSITION is not None:
+                            acc_idx = prim.attributes.POSITION
+                            if 0 <= acc_idx < len(gltf.accessors):
+                                total_vertices += gltf.accessors[acc_idx].count
+        result["vertex_count"] = total_vertices
+
+        # Animations
+        anim_names: list[str] = []
+        if gltf.animations:
+            for anim in gltf.animations:
+                anim_names.append(anim.name or f"Animation_{len(anim_names)}")
+        result["animations"] = anim_names
+        result["animation_count"] = len(anim_names)
+
+        # Materials
+        mat_names: list[str] = []
+        if gltf.materials:
+            for mat in gltf.materials:
+                mat_names.append(mat.name or f"Material_{len(mat_names)}")
+        result["materials"] = mat_names
+        result["material_count"] = len(mat_names)
+
+        # Nodes (scene hierarchy — useful to know root node type)
+        node_count = len(gltf.nodes) if gltf.nodes else 0
+        result["node_count"] = node_count
+
+        # Skins (skeletal animation)
+        has_skeleton = bool(gltf.skins) and len(gltf.skins) > 0
+        result["has_skeleton"] = has_skeleton
+        if has_skeleton:
+            result["skin_count"] = len(gltf.skins)
+            # Count joints
+            total_joints = sum(len(s.joints) for s in gltf.skins if s.joints)
+            result["joint_count"] = total_joints
+
+        # Images/textures
+        texture_count = len(gltf.textures) if gltf.textures else 0
+        image_count = len(gltf.images) if gltf.images else 0
+        result["texture_count"] = texture_count
+        result["image_count"] = image_count
+
+        return result
+
+    except Exception as e:
+        logger.debug("Failed to analyze 3D model %s: %s", file_path, e)
+        return None
+
+
+def _format_3d_model_info(meta: dict[str, Any], res_path: str) -> str:
+    """Format 3D model metadata into a concise usage hint string."""
+    parts = [meta.get("format", "3D")]
+
+    vc = meta.get("vertex_count", 0)
+    if vc:
+        if vc > 1_000_000:
+            parts.append(f"{vc / 1_000_000:.1f}M verts")
+        elif vc > 1000:
+            parts.append(f"{vc / 1000:.1f}K verts")
+        else:
+            parts.append(f"{vc} verts")
+
+    mc = meta.get("mesh_count", 0)
+    if mc:
+        parts.append(f"{mc} mesh{'es' if mc > 1 else ''}")
+
+    mat_c = meta.get("material_count", 0)
+    if mat_c:
+        parts.append(f"{mat_c} material{'s' if mat_c > 1 else ''}")
+
+    lines = [f"3D MODEL ({', '.join(parts)})"]
+
+    # Mesh names
+    meshes = meta.get("meshes", [])
+    if meshes and len(meshes) <= 10:
+        lines.append(f"  Meshes: {', '.join(meshes)}")
+
+    # Animations (CRITICAL info for LLM)
+    anims = meta.get("animations", [])
+    if anims:
+        lines.append(f"  Animations ({len(anims)}): {', '.join(anims)}")
+        lines.append(f"  → Play: $AnimationPlayer.play(\"{anims[0]}\")")
+        lines.append(f"  ⚠️ Animation names are from the glTF file. Godot's importer may modify them")
+        lines.append(f"     (e.g., strip 'Armature|' prefix). If playback fails, list animations at runtime:")
+        lines.append(f"     for a in $AnimationPlayer.get_animation_list(): print(a)")
+    else:
+        lines.append("  No animations (static model)")
+
+    # Skeleton
+    if meta.get("has_skeleton"):
+        joints = meta.get("joint_count", 0)
+        lines.append(f"  Has skeleton ({joints} joints)")
+
+    # Materials
+    mats = meta.get("materials", [])
+    if mats and len(mats) <= 8:
+        lines.append(f"  Materials: {', '.join(mats)}")
+
+    # Usage hints
+    lines.append(f"  Instance in scene: use \"instance\": \"{res_path}\" in node JSON")
+    lines.append(f"  GDScript: var m = preload(\"{res_path}\").instantiate(); add_child(m)")
+
+    return "\n".join(lines)
+
 
 # ─── Approximate token counting ───
 # ~4 chars per token for English/code, conservative estimate
@@ -350,7 +717,7 @@ AGENT_TOOLS = [
                             "type": "object",
                             "properties": {
                                 "filename": {"type": "string"},
-                                "root": {"type": "object", "description": "Root node with name, type, properties, script, groups, children"}
+                                "root": {"type": "object", "description": "Root node with name, type, properties, script, instance, groups, children. Use 'instance' (res:// path to .glb/.tscn) to instance a PackedScene instead of creating a typed node. When using instance, 'type' is ignored."}
                             }
                         }
                     },
@@ -604,6 +971,27 @@ AGENT_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_image",
+            "description": "Analyze a user-attached image using vision AI (Gemini Flash). You CANNOT see images directly — use this tool to understand what an image shows. Provide a specific prompt describing what you want to know about the image (e.g. 'describe this UI screenshot', 'read the error message in this image', 'what sprites/objects are in this sprite sheet?', 'describe the game scene layout'). The user's attached images are numbered starting from 1.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_index": {
+                        "type": "integer",
+                        "description": "Which image to analyze (1-based index). The user's message will tell you how many images are attached."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "What to analyze/look for in the image. Be specific — e.g. 'Describe the game UI layout and all visible elements', 'Read any error messages or code visible in this screenshot', 'List all sprites/characters visible and their positions'."
+                    }
+                },
+                "required": ["image_index", "prompt"]
+            }
+        }
+    },
 ]
 
 # ─── Tool-Prompt Bindings ───
@@ -634,10 +1022,36 @@ def _get_dynamic_prompts(tool_name: str, args: dict, tool_result: str) -> list[s
             prompts.append("tscn_format")
         elif filename.endswith(".gd"):
             prompts.append("godot4_basics")
+        # If the file references 3D models, inject 3D guide
+        if ".glb" in filename or ".gltf" in filename:
+            prompts.append("3d_models")
 
     # If list_assets found sprite sheets, inject sprite sheet guide
     if tool_name == "list_assets" and "is_sprite_sheet" in tool_result:
         prompts.append("sprite_sheet")
+
+    # If list_assets found 3D models, inject 3D model guide
+    if tool_name == "list_assets" and '"category": "model"' in tool_result:
+        prompts.append("3d_models")
+
+    # If generate_project references .glb/.gltf or uses instance field, inject 3D guide
+    if tool_name == "generate_project":
+        args_str = str(args)
+        if ".glb" in args_str or ".gltf" in args_str or '"instance"' in args_str or "'instance'" in args_str:
+            prompts.append("3d_models")
+
+    # If writing a scene or script that references 3D models
+    if tool_name in ("write_file", "patch_file"):
+        content = args.get("content", "")
+        patches_str = str(args.get("patches", ""))
+        combined = content + patches_str
+        if ".glb" in combined or ".gltf" in combined or "AnimationPlayer" in combined:
+            prompts.append("3d_models")
+
+    # If read_file result contains 3D model references, inject 3D guide for context
+    if tool_name == "read_file":
+        if ".glb" in tool_result or ".gltf" in tool_result or "AnimationPlayer" in tool_result:
+            prompts.append("3d_models")
 
     return prompts
 
@@ -685,6 +1099,18 @@ When the user sends images/screenshots:
 
 ## WORKFLOW:
 
+### TASK PLANNING (CRITICAL — prevents incomplete work):
+For any request that requires creating/modifying **2 or more files**, you MUST:
+1. **First, state your plan** in your text reply: list ALL files you will create/modify and what each does.
+2. **Then execute ALL steps** — create every file, wire every signal, connect every scene.
+3. **Do NOT stop after creating just one or two files.** Keep calling tools until EVERY item in your plan is done.
+4. **After ALL files are created/modified**, call `validate_project`, fix any errors, then `update_memory`.
+5. **Your final reply must summarize EVERYTHING you did**, not just the last file.
+
+Example plan for "make a game with gems and a snake":
+> Plan: I will create (1) gem.tscn + gem.gd, (2) snake.tscn + snake.gd, (3) hud.tscn + hud.gd for score, (4) update main.tscn to include all scenes, (5) update player.gd for collection logic.
+Then execute ALL 5 steps before stopping.
+
 ### NEW project:
 1. `list_assets` → `generate_project` (ONCE only) → `validate_project` → fix errors → `update_memory`
 2. Use ALL uploaded assets. Do NOT use ColorRect when real images exist.
@@ -693,15 +1119,29 @@ When the user sends images/screenshots:
 - `list_files`/`read_file` to understand → `patch_file`/`write_file` to fix → `validate_project` → `update_memory`
 - Do NOT call `generate_project` — it already exists!
 - **FOCUS on the user's specific request.** Fix what they asked about, nothing else.
+- **NEVER ask the user for debug output, console logs, or to run the game and report back.** You have tools to diagnose problems yourself. Diagnose and fix problems AUTONOMOUSLY.
+- **Self-debug workflow**: `read_file` (read the broken script) → `run_project` (capture errors, if available) → analyze → `patch_file`/`write_file` (fix) → `validate_project` → done. Do NOT ask the user to do any of these steps for you.
+- **If `run_project` is unavailable** (Godot executable not found): Do NOT fall back to asking the user for runtime output. Instead, reason from the code itself — read the script, identify bugs by code analysis, and fix them. For 3D models/animations, ALWAYS use the runtime discovery pattern (see 3D MODEL GUIDE) — never hardcode animation names regardless of whether you can run the project.
+
+### PRESERVATION RULE (CRITICAL — prevents regression):
+When fixing bugs in an existing project, you MUST:
+- **Read the file FIRST** with `read_file` before making ANY changes.
+- **Use `patch_file` for targeted fixes** — change ONLY the broken parts.
+- **NEVER rewrite an entire file** unless the user explicitly asks for a full rewrite. Overwriting a working file with a new version often deletes existing logic (animation discovery, collision setup, camera controls, etc.), causing NEW bugs.
+- **NEVER remove existing functionality** that wasn't part of the bug report. If the user says "animation doesn't play", fix the animation code — don't delete the movement, camera, or physics code.
+- **NEVER replace runtime discovery patterns with hardcoded values.** If the existing code discovers animations at runtime via `get_animation_list()`, keep that pattern. Do NOT replace it with hardcoded animation names like "A_TPose", "Idle_Loop", etc.
+- If `patch_file` fails (old text doesn't match), re-read the file with `read_file` and try again with the correct text. Do NOT fall back to `write_file` with a full rewrite.
 
 ## KEY RULES:
 1. `generate_project` can only be called ONCE. After that, use read+write/patch.
 2. Always `read_file` before `write_file`/`patch_file`.
-3. Prefer `patch_file` for small changes.
+3. **Prefer `patch_file` for small changes. NEVER use `write_file` to fully rewrite a working file — this causes regressions.**
 4. Always `validate_project` after changes.
 5. Always `update_memory` when done.
 6. **Answer the user's actual question.** Don't guess — read the relevant files first.
 7. **Be efficient with iterations.** If you changed files, keep fixing until validate passes with 0 errors. But if the task is simple (just answering a question, small tweak already done), respond and stop — don't waste iterations.
+8. **NEVER ask the user to provide debug info, console output, animation names, or any runtime data.** You are a fully autonomous agent — solve problems yourself by reading code and reasoning about it.
+9. **NEVER add debug print statements and ask the user to report what they print.** If you need runtime info and `run_project` works, use it directly. If `run_project` is unavailable, reason from code alone.
 
 ## BUILT-IN GUIDES:
 - When you call tools, relevant Godot guides are automatically included in the result under `__guide__`. READ THEM — they contain critical syntax, patterns, and gotchas.
@@ -736,6 +1176,7 @@ def _parse_node(data: dict[str, Any]) -> NodeDesc:
         type=data.get("type", "Node"),
         properties=data.get("properties", {}),
         script=data.get("script"),
+        instance=data.get("instance"),
         groups=data.get("groups", []),
         children=children,
     )
@@ -793,6 +1234,47 @@ def _parse_plan_json(raw: dict[str, Any], output_dir: str) -> ProjectPlan:
         scenes=scenes,
         scripts=scripts,
     )
+
+
+def _validate_instance_paths(node: NodeDesc, project_dir: str, warnings: list[str], node_path: str = "") -> None:
+    """Recursively validate instance paths in a node tree.
+    Checks that instance files exist, and warns about instance+children conflicts."""
+    current_path = f"{node_path}/{node.name}" if node_path else node.name
+
+    if node.instance:
+        # Validate that the instance file exists
+        res_path = node.instance
+        if res_path.startswith("res://"):
+            rel_path = res_path[6:]  # Strip "res://"
+            full_path = Path(project_dir) / rel_path
+            if not full_path.exists():
+                warnings.append(
+                    f"⚠️ Node '{current_path}': instance path '{res_path}' — file not found at '{full_path}'. "
+                    f"Check the path is correct (e.g., res://assets/model.glb, not res://asset/model.glb)."
+                )
+
+        # Warn about instance + children conflict
+        if node.children:
+            child_types = [c.type for c in node.children]
+            anim_conflict = [t for t in child_types if t in ("AnimationPlayer", "AnimationTree")]
+            if anim_conflict:
+                warnings.append(
+                    f"🚫 CRITICAL: Node '{current_path}' is an instanced .glb/.tscn and has "
+                    f"{', '.join(anim_conflict)} as children. GLB files ALREADY contain their own "
+                    f"AnimationPlayer — adding duplicates causes conflicts. "
+                    f"Remove these children and access animations via GDScript: "
+                    f"model.find_child(\"AnimationPlayer\")"
+                )
+            warnings.append(
+                f"⚠️ Node '{current_path}': has both 'instance' and 'children'. "
+                f"Children will be IGNORED for instanced nodes in .tscn. "
+                f"Move children to the PARENT wrapper node instead. "
+                f"Correct: CharacterBody3D → [Model(instance=glb), CollisionShape3D, CameraPivot] "
+                f"Wrong: CharacterBody3D → Model(instance=glb) → [CollisionShape3D, CameraPivot]"
+            )
+
+    for child in node.children:
+        _validate_instance_paths(child, project_dir, warnings, current_path)
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -918,6 +1400,8 @@ class AgentSession:
         self._has_file_changes: bool = False
         # Track which prompt guides have been injected (avoid duplicates)
         self._injected_prompts: set[str] = set()
+        # User-attached images for this session (base64 data URIs), accessible via analyze_image tool
+        self._images: list[str] = []
 
     def _get_runner(self):
         """Lazy-init GodotRunner."""
@@ -981,6 +1465,11 @@ class AgentSession:
             raw = args
             plan = _parse_plan_json(raw, self._output_dir)
 
+            # Validate instance paths before generating
+            instance_warnings: list[str] = []
+            for scene in plan.scenes:
+                _validate_instance_paths(scene.root, self._output_dir, instance_warnings)
+
             from vibe_tools.project_generator import ProjectGenerator
             gen = ProjectGenerator()
             out = gen.generate(plan)
@@ -1010,6 +1499,12 @@ class AgentSession:
                     f"You MUST fix this IMMEDIATELY by reading the relevant scripts and adding preload() references.\n"
                     f"Missing assets:\n" + "\n".join(f"  - {a}" for a in missing_assets) + "\n"
                     f"After validate_project, use read_file + patch_file/write_file to add these asset references to appropriate scripts."
+                )
+
+            if instance_warnings:
+                result_data["INSTANCE_WARNINGS"] = (
+                    f"⚠️ {len(instance_warnings)} instance path issue(s):\n"
+                    + "\n".join(f"  - {w}" for w in instance_warnings)
                 )
 
             return json.dumps(result_data)
@@ -1348,14 +1843,24 @@ class AgentSession:
                         asset_info["width"] = meta["width"]
                         asset_info["height"] = meta["height"]
                         if meta.get("is_sheet"):
+                            # Use vision AI to identify animation row names
+                            meta = _analyze_sprite_rows_with_vision(f, meta)
                             asset_info["is_sprite_sheet"] = True
                             asset_info["hframes"] = meta["hframes"]
                             asset_info["vframes"] = meta["vframes"]
                             asset_info["frame_width"] = meta["frame_width"]
                             asset_info["frame_height"] = meta["frame_height"]
                             asset_info["total_frames"] = meta["total_frames"]
+                            asset_info["detection_confidence"] = "high" if meta.get("detection_method") == "alpha_scan" else "low"
+                            if meta.get("vision_analyzed"):
+                                asset_info["animation_names_source"] = "vision_ai"
                             if meta.get("rows_info"):
                                 asset_info["animation_rows"] = meta["rows_info"]
+                # Analyze 3D models for mesh/animation metadata
+                elif category == "model" and f.suffix.lower() in ASSET_EXTENSIONS_MODEL:
+                    meta_3d = _analyze_3d_model(f)
+                    if meta_3d:
+                        asset_info["model_meta"] = meta_3d
                 assets.append(asset_info)
 
         if assets:
@@ -1370,16 +1875,22 @@ class AgentSession:
                 img_lines = []
                 for a in images:
                     if a.get("is_sprite_sheet"):
+                        confidence = a.get("detection_confidence", "unknown")
+                        names_source = a.get("animation_names_source", "generic")
                         img_lines.append(
                             f"  {a['filename']}: SPRITE SHEET ({a['width']}×{a['height']}px, "
-                            f"grid {a['hframes']}col × {a['vframes']}row, frame {a['frame_width']}×{a['frame_height']}px)\n"
+                            f"grid {a['hframes']}col × {a['vframes']}row, frame {a['frame_width']}×{a['frame_height']}px, "
+                            f"grid detection: {confidence})\n"
                             f"    → USE: Sprite2D(hframes={a['hframes']}, vframes={a['vframes']}) "
                             f"OR AnimatedSprite2D + SpriteFrames + AtlasTexture(region=Rect2(col*{a['frame_width']}, row*{a['frame_height']}, {a['frame_width']}, {a['frame_height']}))\n"
                             f"    ⚠️ DO NOT use as single texture!"
                         )
                         if a.get("animation_rows"):
                             for ri in a["animation_rows"][:8]:
-                                img_lines.append(f"    Row {ri['row']} ({ri['frame_count']} frames): suggested \"{ri['suggested_name']}\"")
+                                source_tag = " [AI]" if ri.get("name_source") == "vision_ai" else " [unverified]"
+                                img_lines.append(f"    Row {ri['row']} ({ri['frame_count']} frames): \"{ri['suggested_name']}\"{source_tag}")
+                        if names_source != "vision_ai":
+                            img_lines.append(f"    ⚠️ Animation names are auto-guessed — ask user to confirm if unsure")
                     else:
                         w = a.get("width", "?")
                         h = a.get("height", "?")
@@ -1397,11 +1908,18 @@ class AgentSession:
                     f"  Play: $AudioPlayer.play()"
                 )
             if models:
-                names = ", ".join(a["filename"] for a in models)
+                model_lines = []
+                for a in models:
+                    meta_3d = a.get("model_meta")
+                    if meta_3d:
+                        model_lines.append(f"  {a['filename']}: {_format_3d_model_info(meta_3d, a['res_path'])}")
+                    else:
+                        model_lines.append(f"  {a['filename']}: 3D model (no metadata available)")
+                        model_lines.append(f"    Instance in scene: use \"instance\": \"{a['res_path']}\" in node JSON")
+                        model_lines.append(f"    GDScript: var m = preload(\"{a['res_path']}\").instantiate(); add_child(m)")
                 usage_hints.append(
-                    f"3D MODELS ({len(models)}): {names}\n"
-                    f"  In GDScript: var scene = preload(\"{models[0]['res_path']}\")\n"
-                    f"  Instance: add_child(scene.instantiate())"
+                    f"3D MODELS ({len(models)}):\n" + "\n".join(model_lines) + "\n"
+                    f"  ⚠️ To instance in generate_project, add \"instance\": \"res://...\" to the node (NOT type=\"PackedScene\")"
                 )
             if fonts:
                 names = ", ".join(a["filename"] for a in fonts)
@@ -1456,7 +1974,14 @@ class AgentSession:
                 if category == "image" and f.suffix.lower() in ASSET_EXTENSIONS_IMAGE:
                     meta = _analyze_sprite_sheet(f)
                     if meta:
+                        if meta.get("is_sheet"):
+                            meta = _analyze_sprite_rows_with_vision(f, meta)
                         asset_entry["meta"] = meta
+                # Analyze 3D models for mesh/animation metadata
+                elif category == "model" and f.suffix.lower() in ASSET_EXTENSIONS_MODEL:
+                    meta_3d = _analyze_3d_model(f)
+                    if meta_3d:
+                        asset_entry["meta_3d"] = meta_3d
                 assets.append(asset_entry)
 
         if not assets:
@@ -1524,9 +2049,16 @@ class AgentSession:
             lines.append(f"  Usage: `$Label.add_theme_font_override(\"font\", preload(\"{fonts[0]['res_path']}\"))`")
 
         if models:
-            lines.append("### 3D Models:")
+            lines.append("### 3D Models (use \"instance\" field in generate_project nodes, or preload in GDScript):")
             for a in models:
-                lines.append(f"- `{a['res_path']}`")
+                meta_3d = a.get("meta_3d")
+                if meta_3d:
+                    info = _format_3d_model_info(meta_3d, a["res_path"])
+                    lines.append(f"- `{a['res_path']}` → {info}")
+                else:
+                    lines.append(f"- `{a['res_path']}`")
+            lines.append(f"  Instance in scene JSON: `\"instance\": \"{models[0]['res_path']}\"`")
+            lines.append(f"  GDScript: `var m = preload(\"{models[0]['res_path']}\").instantiate(); add_child(m)`")
 
         lines.append(f"\n**Total: {len(assets)} assets. You MUST preload() and use ALL of them in your scripts.**")
         return "\n".join(lines)
@@ -1703,23 +2235,35 @@ class AgentSession:
                         prop = key
                     
                     section_header = f"[{section}]"
-                    # Format value
-                    if isinstance(value, bool):
+                    
+                    # Format value based on type and context
+                    if section == "input" and isinstance(value, dict):
+                        # Input mapping: format as Godot input action
+                        val_str = self._format_input_action(prop, value)
+                    elif isinstance(value, bool):
                         val_str = "true" if value else "false"
                     elif isinstance(value, (int, float)):
                         val_str = str(value)
                     elif isinstance(value, str):
                         val_str = f'"{value}"'
+                    elif isinstance(value, dict):
+                        # Generic dict — convert Python bools/None to Godot format
+                        val_str = self._format_godot_value(value)
                     else:
                         val_str = str(value)
                     
-                    line_entry = f"{prop}={val_str}"
+                    # For input actions, val_str already includes the full multi-line block
+                    if section == "input" and isinstance(value, dict):
+                        line_entry = val_str  # Already formatted as "prop={\n...\n}"
+                    else:
+                        line_entry = f"{prop}={val_str}"
                     
                     if section_header in content:
                         # Find the section and check if property exists
                         lines = content.split("\n")
                         section_idx = None
                         prop_idx = None
+                        prop_end_idx = None
                         next_section_idx = None
                         for i, line in enumerate(lines):
                             if line.strip() == section_header:
@@ -1729,12 +2273,23 @@ class AgentSession:
                                 break
                             elif section_idx is not None and line.startswith(f"{prop}="):
                                 prop_idx = i
+                                # For multi-line values (like input actions with {}), find the end
+                                if "{" in line:
+                                    brace_count = line.count("{") - line.count("}")
+                                    prop_end_idx = i
+                                    while brace_count > 0 and prop_end_idx + 1 < len(lines):
+                                        prop_end_idx += 1
+                                        brace_count += lines[prop_end_idx].count("{") - lines[prop_end_idx].count("}")
+                                else:
+                                    prop_end_idx = i
                         
                         if prop_idx is not None:
-                            lines[prop_idx] = line_entry
+                            # Replace existing property (possibly multi-line)
+                            lines[prop_idx:prop_end_idx + 1] = line_entry.split("\n")
                         elif section_idx is not None:
                             insert_at = next_section_idx if next_section_idx else len(lines)
-                            lines.insert(insert_at, line_entry)
+                            for j, new_line in enumerate(line_entry.split("\n")):
+                                lines.insert(insert_at + j, new_line)
                         content = "\n".join(lines)
                     else:
                         # Add new section
@@ -1747,6 +2302,84 @@ class AgentSession:
             return json.dumps({"ok": True, "message": "project.godot updated"})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+    @staticmethod
+    def _format_input_action(action_name: str, action_data: dict) -> str:
+        """Format an input action dict into Godot project.godot format.
+        
+        Converts LLM-provided input action data (Python dict) into Godot's 
+        native Object() serialization format for project.godot.
+        """
+        deadzone = action_data.get("deadzone", 0.2)
+        events = action_data.get("events", [])
+        
+        formatted_events = []
+        for evt in events:
+            evt_type = evt.get("type", "InputEventKey")
+            if evt_type == "InputEventKey":
+                keycode = evt.get("physical_keycode", evt.get("keycode", 0))
+                formatted_events.append(
+                    f'Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"",'
+                    f'"device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,'
+                    f'"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":0,'
+                    f'"physical_keycode":{keycode},"key_label":0,"unicode":0,"location":0,'
+                    f'"echo":false,"script":null)'
+                )
+            elif evt_type == "InputEventJoypadButton":
+                button = evt.get("button_index", 0)
+                formatted_events.append(
+                    f'Object(InputEventJoypadButton,"resource_local_to_scene":false,'
+                    f'"resource_name":"","device":-1,"button_index":{button},'
+                    f'"pressure":0.0,"pressed":false,"script":null)'
+                )
+            elif evt_type == "InputEventJoypadMotion":
+                axis = evt.get("axis", 0)
+                axis_value = evt.get("axis_value", 1.0)
+                formatted_events.append(
+                    f'Object(InputEventJoypadMotion,"resource_local_to_scene":false,'
+                    f'"resource_name":"","device":-1,"axis":{axis},'
+                    f'"axis_value":{axis_value},"script":null)'
+                )
+            elif evt_type == "InputEventMouseButton":
+                button = evt.get("button_index", 1)
+                formatted_events.append(
+                    f'Object(InputEventMouseButton,"resource_local_to_scene":false,'
+                    f'"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,'
+                    f'"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,'
+                    f'"button_mask":0,"position":Vector2(0,0),"global_position":Vector2(0,0),'
+                    f'"factor":1.0,"button_index":{button},"canceled":false,"pressed":false,'
+                    f'"double_click":false,"script":null)'
+                )
+        
+        events_str = ", ".join(formatted_events)
+        return (
+            f'{action_name}={{\n'
+            f'"deadzone": {deadzone},\n'
+            f'"events": [{events_str}]\n'
+            f'}}'
+        )
+
+    @staticmethod
+    def _format_godot_value(value: Any) -> str:
+        """Convert a Python value to Godot config format string."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        elif isinstance(value, (int, float)):
+            return str(value)
+        elif isinstance(value, str):
+            return f'"{value}"'
+        elif value is None:
+            return "null"
+        elif isinstance(value, dict):
+            # Convert Python dict to Godot-compatible string
+            parts = []
+            for k, v in value.items():
+                parts.append(f'"{k}": {GameGenerator._format_godot_value(v)}')
+            return "{" + ", ".join(parts) + "}"
+        elif isinstance(value, list):
+            items = [GameGenerator._format_godot_value(v) for v in value]
+            return "[" + ", ".join(items) + "]"
+        return str(value)
 
     def _tool_run_project(self, args: dict) -> str:
         """Tool: run_project - run the game and capture output/errors."""
@@ -1763,7 +2396,14 @@ class AgentSession:
             if not self._runner or not self._runner.is_available():
                 return json.dumps({
                     "ok": False,
-                    "error": "Godot executable not available. Cannot run project. Use validate_project instead for static checking."
+                    "error": (
+                        "Godot executable not available. Cannot run project. "
+                        "DO NOT ask the user to run the project and send you output. "
+                        "Instead: (1) Use `read_file` to inspect the code and reason about bugs. "
+                        "(2) Use `validate_project` for static syntax checking. "
+                        "(3) For 3D animations, ALWAYS use runtime discovery patterns (get_animation_list + keyword matching) — never hardcode animation names. "
+                        "(4) Fix issues based on code analysis alone."
+                    )
                 })
             
             import subprocess
@@ -1773,6 +2413,17 @@ class AgentSession:
             project_path = str(Path(self._output_dir).resolve())
             
             self._add_step("thinking", f"Running project for {timeout}s...")
+            
+            # Ensure resources are imported first (GLB models, textures, etc.)
+            import_proc = subprocess.run(
+                [exe, "--path", project_path, "--headless", "--import"],
+                capture_output=True,
+                timeout=60,
+                cwd=project_path,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if import_proc.returncode != 0:
+                logger.warning("Godot --import returned %d", import_proc.returncode)
             
             proc = subprocess.Popen(
                 [exe, "--path", project_path, "--headless", "--quit-after", str(timeout)],
@@ -1967,6 +2618,32 @@ class AgentSession:
             return json.dumps({"ok": True, "message": msg})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+    def _tool_analyze_image(self, args: dict) -> str:
+        """Tool: analyze_image — use Gemini Flash vision to analyze a user-attached image.
+
+        The main Agent (Claude Opus) cannot see images directly. It calls this tool
+        with a specific prompt to get a text description/analysis of the image.
+        """
+        image_index = args.get("image_index", 1)
+        prompt = args.get("prompt", "Describe this image in detail.")
+
+        if not self._images:
+            return json.dumps({"ok": False, "error": "No images attached to this message."})
+
+        if image_index < 1 or image_index > len(self._images):
+            return json.dumps({
+                "ok": False,
+                "error": f"Invalid image_index {image_index}. Available: 1 to {len(self._images)}."
+            })
+
+        image_data = self._images[image_index - 1]
+        self._add_step("tool_call", f"Analyzing image {image_index} with vision AI...")
+
+        result = _analyze_image_with_vision(image_data, prompt)
+
+        self._add_step("success", f"Image {image_index} analysis complete")
+        return json.dumps({"ok": True, "image_index": image_index, "analysis": result})
 
     def _load_project_memory(self) -> str | None:
         """Load project memory from memory.md if it exists."""
@@ -2234,6 +2911,7 @@ class AgentSession:
         "create_resource": "_tool_create_resource",
         "patch_file": "_tool_patch_file",
         "export_web": "_tool_export_web",
+        "analyze_image": "_tool_analyze_image",
     }
 
     def _execute_tool(self, tool_name: str, args: dict) -> str:
@@ -2354,6 +3032,17 @@ class AgentSession:
             {"role": "system", "content": system_content},
         ]
 
+        # Pre-inject domain-specific guides based on detected asset types
+        # This ensures the LLM sees detailed rules BEFORE calling generate_project (which is one-shot)
+        if asset_inventory and "### 3D Models" in asset_inventory:
+            guide_3d = _load_prompt_file("3d_models")
+            if guide_3d:
+                messages.append({
+                    "role": "system",
+                    "content": f"## 3D MODEL GUIDE (READ BEFORE generating any 3D project):\n\n{guide_3d}"
+                })
+                self._injected_prompts.add("3d_models")
+
         # Add memory context if available — summarize if too long to prevent attention dilution
         if memory_content:
             prepared_memory = self._prepare_memory_for_injection(memory_content)
@@ -2413,26 +3102,26 @@ class AgentSession:
         else:
             text_content = user_prompt
 
-        # Build user message — multimodal if images provided, plain text otherwise
+        # Store images in session so the analyze_image tool can access them
         if images:
-            # Add explicit instruction to examine the images
-            img_count = len(images)
-            img_hint = f"\n\n[{img_count} image(s) attached — CAREFULLY examine each image before responding. Describe what you see in the image(s) and address the user's request based on the visual content.]"
-            content_parts: list[dict[str, Any]] = [{"type": "text", "text": text_content + img_hint}]
-            for img_data in images:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": img_data},
-                })
-            messages.append({"role": "user", "content": content_parts})
-        else:
-            messages.append({"role": "user", "content": text_content})
+            self._images = images
+            img_hint = (
+                f"\n\n[{len(images)} image(s) attached. You CANNOT see them directly. "
+                f"Use the `analyze_image` tool with a specific prompt to understand what each image shows. "
+                f"Available image indices: 1 to {len(images)}.]"
+            )
+            text_content += img_hint
+
+        messages.append({"role": "user", "content": text_content})
 
         # Start with all tools; configure based on mode
         current_tools = list(AGENT_TOOLS)
         if is_existing:
             # Remove generate_project for existing projects
             current_tools = [t for t in current_tools if t["function"]["name"] != "generate_project"]
+        if not images:
+            # Remove analyze_image when no images attached (avoid confusing the Agent)
+            current_tools = [t for t in current_tools if t["function"]["name"] != "analyze_image"]
 
         iteration = 0
         final_validation_ok = False
@@ -2610,7 +3299,24 @@ class AgentSession:
                             break
 
                         # Case 3: Agent gave text but validation hasn't passed yet
-                        # If consecutive text-only responses >= 2, agent is stuck/done — let post-loop handle validation
+                        # Check if agent appears to have only partially completed the task
+                        # (made some file changes but stopped with a summary instead of finishing)
+                        if self._has_file_changes and consecutive_no_tools == 1:
+                            # Agent wrote some files then gave a text summary — nudge it to continue
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "You have NOT finished the task yet. You created some files but the full request "
+                                    "is not complete. Review the user's original request and your plan — continue "
+                                    "creating ALL remaining files and scenes. Do NOT stop until everything is done, "
+                                    "then call `validate_project` and `update_memory`."
+                                ),
+                            })
+                            consecutive_no_tools = 0  # Reset so agent gets another chance
+                            self._add_step("thinking", "Agent paused mid-task. Nudging to continue...")
+                            continue
+
+                        # If consecutive text-only responses >= 2 even after nudge, agent is truly stuck
                         if consecutive_no_tools >= 2:
                             self._add_step("thinking", f"Agent stopped calling tools after {iteration} iterations. Moving to post-loop validation.")
                             break
@@ -2649,6 +3355,14 @@ class AgentSession:
                     consecutive_no_tools += 1
                     last_iter_had_tools = False
                     self._add_step("error", "LLM returned empty message")
+                    # If agent has made file changes but returned empty, nudge it to continue
+                    if self._has_file_changes and consecutive_no_tools == 1:
+                        messages.append({
+                            "role": "user",
+                            "content": "Continue working. You have not finished the task. Keep creating/modifying files as needed.",
+                        })
+                        self._add_step("thinking", "Empty response mid-task. Nudging agent to continue...")
+                        continue
                     if consecutive_no_tools >= 2:
                         break
 
@@ -2929,14 +3643,17 @@ class GameGenerator:
     MAX_ITERATIONS_EXISTING = AgentSession.MAX_ITERATIONS_EXISTING
     MAX_ITERATIONS_CHAT = AgentSession.MAX_ITERATIONS_CHAT
 
+    # The agent model for code generation. Set via AGENT_MODEL env var.
+
+    AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-20250514")
+
     def __init__(
         self,
-        model: str = "gemini-2.5-pro",
         api_key: str | None = None,
         base_url: str | None = None,
     ):
         self.llm = SimpleLLMProvider(
-            model=model,
+            model=self.AGENT_MODEL,
             api_key=api_key,
             base_url=base_url,
         )

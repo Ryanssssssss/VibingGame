@@ -1123,17 +1123,8 @@ body {
     <input type="password" id="cfgApiKey" placeholder="Enter your API key...">
     <label>Base URL</label>
     <input type="text" id="cfgBaseUrl" placeholder="e.g. https://api.openai.com (OpenAI-compatible endpoint)">
-    <label>Model</label>
-    <select id="cfgModel">
-      <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-      <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-      <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
-      <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-      <option value="global.anthropic.claude-haiku-4-5-20251001-v1:0">claude-4.5-haiku</option>
-      <option value="global.anthropic.claude-sonnet-4-5-20250929-v1:0">claude-4.5-sonnet</option>
-      <option value="global.anthropic.claude-opus-4-5-20251101-v1:0">claude-4.5-opus</option>
-      <option value="global.anthropic.claude-opus-4-6-v1">claude-4.6-opus</option>
-    </select>
+    <label>Agent Model</label>
+    <p style="color:#888;font-size:0.85em;margin:0 0 8px;font-style:italic">Claude 4.6 Opus (fixed — image analysis uses Gemini Flash separately)</p>
     <label>Output Directory</label>
     <input type="text" id="cfgOutputDir" placeholder="~/GodotVibeProjects">
     <label>Godot Executable Path</label>
@@ -1265,7 +1256,6 @@ body {
 let config = {
   apiKey: localStorage.getItem('gv_apiKey') || '',
   baseUrl: localStorage.getItem('gv_baseUrl') || '',
-  model: localStorage.getItem('gv_model') || 'gemini-2.5-flash',
   outputDir: localStorage.getItem('gv_outputDir') || '',
   godotExe: localStorage.getItem('gv_godotExe') || '',
 };
@@ -1326,10 +1316,6 @@ function toggle(id, active) {
 function restoreSettings() {
   document.getElementById('cfgApiKey').value = config.apiKey;
   document.getElementById('cfgBaseUrl').value = config.baseUrl;
-  const sel = document.getElementById('cfgModel');
-  for (const opt of sel.options) {
-    if (opt.value === config.model) { opt.selected = true; break; }
-  }
   document.getElementById('cfgOutputDir').value = config.outputDir;
   document.getElementById('cfgGodotExe').value = config.godotExe;
 }
@@ -1615,7 +1601,6 @@ async function sendMessage() {
         project_dir: currentProjectDir,
         api_key: config.apiKey || null,
         base_url: config.baseUrl || null,
-        model: config.model || null,
         images: imagesToSend,
       }),
     });
@@ -2326,13 +2311,11 @@ async function saveSettings() {
   const saveBtn = document.querySelector('#settingsModal .btn-primary');
   config.apiKey = document.getElementById('cfgApiKey').value.trim();
   config.baseUrl = document.getElementById('cfgBaseUrl').value.trim();
-  config.model = document.getElementById('cfgModel').value || 'gemini-2.5-flash';
   config.outputDir = document.getElementById('cfgOutputDir').value.trim();
   config.godotExe = document.getElementById('cfgGodotExe').value.trim();
 
   localStorage.setItem('gv_apiKey', config.apiKey);
   localStorage.setItem('gv_baseUrl', config.baseUrl);
-  localStorage.setItem('gv_model', config.model);
   localStorage.setItem('gv_outputDir', config.outputDir);
   localStorage.setItem('gv_godotExe', config.godotExe);
 
@@ -2351,7 +2334,7 @@ async function saveSettings() {
     const res = await fetch('/api/config', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ api_key: config.apiKey, base_url: config.baseUrl || null, model: config.model || null, godot_exe: config.godotExe || null }),
+      body: JSON.stringify({ api_key: config.apiKey, base_url: config.baseUrl || null, godot_exe: config.godotExe || null }),
     });
     if (res.ok) {
       const data = await res.json();

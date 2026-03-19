@@ -15,6 +15,7 @@
     "particles": "GPU particles 2D/3D: ParticleProcessMaterial, color ramps, common effects (explosion/fire/smoke/rain)",
     "networking": "Multiplayer: ENet/WebSocket, RPC, MultiplayerSpawner/Synchronizer, authority",
     "shaders": "Shaders: canvas_item/spatial/particles, ShaderMaterial, flash/outline examples, StandardMaterial3D",
-    "signals_patterns": "Signals, scene management, groups, autoload singletons, state machine, object pool, screen shake"
+    "signals_patterns": "Signals, scene management, groups, autoload singletons, state machine, object pool, screen shake",
+    "3d_models": "3D models (.glb/.gltf): instance in .tscn, animations (runtime discovery, NEVER guess names), third-person camera-relative movement, model facing, scale adjustment, correct scene structure (NO children on instanced nodes)"
   }
 }

@@ -34,7 +34,7 @@ from vibe_tools.api_parser import APIKnowledgeBase
 from vibe_tools.models import ASSET_EXTENSIONS_ALL, PROJECT_SOURCE_EXTENSIONS, is_ignored_path, classify_asset
 from vibe_tools.project_generator import ProjectGenerator
 from vibe_tools.godot_runner import GodotRunner
-from vibe_tools.llm_provider import GameGenerator
+from vibe_tools.agent import GameGenerator
 from vibe_tools.templates import TEMPLATES, get_template
 
 logger = logging.getLogger(__name__)
@@ -83,25 +83,24 @@ class UserSession:
     def touch(self):
         self.last_active = time.time()
 
-    def get_generator(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> GameGenerator:
+    def get_generator(self, api_key: str | None = None, base_url: str | None = None, **_kwargs) -> GameGenerator:
+        """Get or create GameGenerator. The agent model is ALWAYS claude-4.6-opus (hardcoded).
+        Only api_key and base_url are configurable; the `model` kwarg is ignored."""
         effective_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY")
         effective_url = base_url or os.getenv("LLM_BASE_URL") or os.getenv("GEMINI_BASE_URL")
-        effective_model = model or os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
         with self._generator_lock:
             config_changed = (
                 self._generator is None
                 or effective_key != self._last_config["api_key"]
                 or effective_url != self._last_config["base_url"]
-                or effective_model != self._last_config["model"]
             )
             if config_changed:
                 self._generator = GameGenerator(
-                    model=effective_model,
                     api_key=effective_key,
                     base_url=effective_url,
                 )
-                self._last_config = {"api_key": effective_key, "base_url": effective_url, "model": effective_model}
+                self._last_config = {"api_key": effective_key, "base_url": effective_url}
             return self._generator
 
     def track_pid(self, pid: int):
@@ -117,10 +116,20 @@ class UserSession:
                     pass
             self._pids.clear()
 
-    def owns_project(self, project_dir: str) -> bool:
-        """Check if a project directory belongs to this session."""
+    def owns_project(self, project_dir: str, local_mode: bool = False) -> bool:
+        """Check if a project directory belongs to this session.
+        
+        In local_mode, any project under DEFAULT_OUTPUT_DIR is accepted
+        (single-user local development doesn't need strict session isolation).
+        """
         try:
-            Path(project_dir).resolve().relative_to(self.output_dir.resolve())
+            resolved = Path(project_dir).resolve()
+            # Local mode: accept any project under the global output dir
+            if local_mode:
+                resolved.relative_to(DEFAULT_OUTPUT_DIR.resolve())
+                return True
+            # Remote mode: strict session isolation
+            resolved.relative_to(self.output_dir.resolve())
             return True
         except ValueError:
             return False
@@ -244,7 +253,6 @@ class ChatRequest(BaseModel):
     project_dir: str | None = None
     api_key: str | None = None
     base_url: str | None = None
-    model: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -253,7 +261,6 @@ class GenerateRequest(BaseModel):
     project_dir: str | None = None
     api_key: str | None = None
     base_url: str | None = None
-    model: str | None = None
     images: list[str] | None = None
 
 
@@ -292,7 +299,7 @@ async def status(request: Request):
         "godot_path": runner.exe_path if runner and godot_available else None,
         "api_cached": api_cached,
         "llm_configured": llm_configured,
-        "default_output_dir": str(sess.output_dir),
+        "default_output_dir": str(DEFAULT_OUTPUT_DIR if _is_local_request(request) else sess.output_dir),
         "session_id": sess.session_id,
     }
 
@@ -313,7 +320,7 @@ async def configure(req: ConfigRequest, request: Request):
             raise HTTPException(status_code=400, detail=f"Godot executable not found at: {req.godot_exe}")
 
     try:
-        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url)
         available_models = []
         try:
             available_models = gen.llm.list_models()
@@ -349,8 +356,10 @@ async def chat(req: ChatRequest, request: Request):
     """Chat with the AI game designer (Agent mode, per-session)."""
     sess = _get_session(request)
     try:
-        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
-        output_dir = req.output_dir or str(sess.output_dir / "_pending")
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url)
+        output_dir = req.output_dir or str(
+            (DEFAULT_OUTPUT_DIR if _is_local_request(request) else sess.output_dir) / "_pending"
+        )
         result = gen.chat(req.message, output_dir=output_dir)
 
         response_data: dict[str, Any] = {
@@ -382,28 +391,30 @@ async def generate(req: GenerateRequest, request: Request):
     """Generate a game project from natural language using Agent loop (per-session)."""
     sess = _get_session(request)
     try:
-        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+        gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url)
+        # Local mode: use global output dir instead of session subdirectory
+        base_dir = DEFAULT_OUTPUT_DIR if _is_local_request(request) else sess.output_dir
 
         if req.project_dir:
             output_dir = req.project_dir
         elif req.output_dir:
             output_dir = req.output_dir
         else:
-            output_dir = str(sess.output_dir / "_pending")
+            output_dir = str(base_dir / "_pending")
 
         result = gen.agent_generate(req.prompt, output_dir)
 
         # Rename _pending to actual project name
         if (result.get("project") and not result.get("conversational")
                 and not req.project_dir
-                and output_dir == str(sess.output_dir / "_pending")):
+                and output_dir == str(base_dir / "_pending")):
             project_name = result["project"].get("name", "VibeGame")
             safe_name = "".join(c for c in project_name if c.isalnum() or c in " _-").strip() or "VibeGame"
-            new_dir = sess.output_dir / safe_name
+            new_dir = base_dir / safe_name
             if new_dir.exists():
                 import time as _time
                 safe_name = f"{safe_name}_{int(_time.time()) % 10000}"
-                new_dir = sess.output_dir / safe_name
+                new_dir = base_dir / safe_name
             pending_path = Path(output_dir)
             if pending_path.exists():
                 import shutil
@@ -428,6 +439,8 @@ async def generate(req: GenerateRequest, request: Request):
 async def generate_stream(req: GenerateRequest, request: Request):
     """Generate a game project with real-time SSE streaming (per-session)."""
     sess = _get_session(request)
+    is_local = _is_local_request(request)
+    base_dir = DEFAULT_OUTPUT_DIR if is_local else sess.output_dir
     step_queue: queue.Queue = queue.Queue()
 
     def step_callback(step):
@@ -435,29 +448,29 @@ async def generate_stream(req: GenerateRequest, request: Request):
 
     def run_agent():
         try:
-            gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url, model=req.model)
+            gen = sess.get_generator(api_key=req.api_key, base_url=req.base_url)
             if req.project_dir:
                 output_dir = req.project_dir
             elif req.output_dir:
                 output_dir = req.output_dir
             else:
-                output_dir = str(sess.output_dir / "_pending")
+                output_dir = str(base_dir / "_pending")
             
             result = gen.agent_generate(req.prompt, output_dir, step_callback=step_callback, images=req.images)
             
             # If agent generated a project and output was _pending, rename
             if (result.get("project") and not result.get("conversational")
                     and not req.project_dir
-                    and output_dir == str(sess.output_dir / "_pending")):
+                    and output_dir == str(base_dir / "_pending")):
                 project_name = result["project"].get("name", "VibeGame")
                 safe_name = "".join(c for c in project_name if c.isalnum() or c in " _-").strip()
                 if not safe_name:
                     safe_name = "VibeGame"
-                new_dir = sess.output_dir / safe_name
+                new_dir = base_dir / safe_name
                 if new_dir.exists() and new_dir != Path(output_dir):
                     import time as _time
                     safe_name = f"{safe_name}_{int(_time.time()) % 10000}"
-                    new_dir = sess.output_dir / safe_name
+                    new_dir = base_dir / safe_name
                 pending_path = Path(output_dir)
                 if pending_path.exists():
                     import shutil
@@ -519,7 +532,9 @@ async def create_from_template(req: TemplateRequest, request: Request):
     sess = _get_session(request)
     try:
         template = get_template(req.template_name)
-        output_dir = req.output_dir or str(sess.output_dir / req.project_name)
+        output_dir = req.output_dir or str(
+            (DEFAULT_OUTPUT_DIR if _is_local_request(request) else sess.output_dir) / req.project_name
+        )
         plan = template.create_plan(req.project_name, output_dir)
         out = _project_gen.generate(plan)
 
@@ -652,7 +667,7 @@ async def open_editor(request: Request):
     if not _is_local_request(request):
         raise HTTPException(status_code=403, detail="Cannot open Godot editor remotely. Download the project and open it with your local Godot.")
 
-    if not sess.owns_project(project_dir):
+    if not sess.owns_project(project_dir, local_mode=_is_local_request(request)):
         raise HTTPException(status_code=403, detail="You can only open projects in your own session")
 
     runner = _get_runner()
@@ -690,7 +705,7 @@ async def run_game(request: Request):
 
     # Local user → launch Godot process on this machine
     if _is_local_request(request):
-        if not sess.owns_project(project_dir):
+        if not sess.owns_project(project_dir, local_mode=True):
             raise HTTPException(status_code=403, detail="You can only run projects in your own session")
         runner = _get_runner()
         if not runner or not runner.is_available():
@@ -758,7 +773,7 @@ async def export_web(request: Request):
     project_dir = body.get("project_dir")
     if not project_dir:
         raise HTTPException(status_code=400, detail="project_dir required")
-    if not sess.owns_project(project_dir) and not _is_safe_project_dir(project_dir):
+    if not sess.owns_project(project_dir, local_mode=_is_local_request(request)) and not _is_safe_project_dir(project_dir):
         raise HTTPException(status_code=403, detail="Invalid project directory")
 
     runner = _get_runner()
@@ -799,7 +814,7 @@ async def export_windows(request: Request):
     project_dir = body.get("project_dir")
     if not project_dir:
         raise HTTPException(status_code=400, detail="project_dir required")
-    if not sess.owns_project(project_dir) and not _is_safe_project_dir(project_dir):
+    if not sess.owns_project(project_dir, local_mode=_is_local_request(request)) and not _is_safe_project_dir(project_dir):
         raise HTTPException(status_code=403, detail="Invalid project directory")
 
     runner = _get_runner()
@@ -832,8 +847,10 @@ async def download_export(session_id: str, dir_name: str, filename: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Look in _win_export directory
+    # Look in _win_export directory (try session dir first, then global dir)
     export_dir = sess.output_dir / dir_name / "_win_export"
+    if not export_dir.exists():
+        export_dir = DEFAULT_OUTPUT_DIR / dir_name / "_win_export"
     if not export_dir.exists():
         raise HTTPException(status_code=404, detail="Export directory not found")
 
@@ -905,6 +922,8 @@ async def play_game_files(session_id: str, dir_name: str, file_path: str = ""):
         raise HTTPException(status_code=404, detail="Session not found")
 
     export_dir = sess.output_dir / dir_name / "_web_export"
+    if not export_dir.exists():
+        export_dir = DEFAULT_OUTPUT_DIR / dir_name / "_web_export"
     if not export_dir.exists():
         raise HTTPException(status_code=404, detail="Export directory not found")
 
@@ -1162,46 +1181,76 @@ async def update_project_memory(request: Request):
 
 @app.get("/api/projects")
 async def list_projects(request: Request, output_dir: str | None = None):
-    """List all generated projects in the session's output directory."""
+    """List all generated projects.
+    
+    Local mode: scans DEFAULT_OUTPUT_DIR and all subdirectories for project.godot,
+    so projects from any session are visible (single-user local dev).
+    Remote mode: only lists projects in the session's own output directory.
+    """
     sess = _get_session(request)
-    base = Path(output_dir) if output_dir else sess.output_dir
+    is_local = _is_local_request(request)
+
+    if output_dir:
+        base = Path(output_dir)
+    elif is_local:
+        # Local user: show ALL projects under the global output dir
+        base = DEFAULT_OUTPUT_DIR
+    else:
+        base = sess.output_dir
+
     if not base.exists():
         return {"projects": []}
 
     projects = []
-    try:
-        items = sorted(base.iterdir(), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
-    except OSError:
-        return {"projects": []}
 
-    for item in items:
-        if not item.is_dir():
-            continue
-        if not (item / "project.godot").exists():
-            continue
+    def _collect_projects(directory: Path, depth: int = 0):
+        """Recursively find project.godot in directory (max 2 levels deep)."""
+        if depth > 2:
+            return
         try:
-            stat = item.stat()
-            file_count = sum(
-                1 for f in item.rglob("*")
-                if f.is_file() and f.suffix in PROJECT_SOURCE_EXTENSIONS
-            )
-            has_memory = (item / "memory.md").exists()
-            has_chat = (item / "chat_history.json").exists()
-            assets_dir = item / "assets"
-            has_assets = assets_dir.is_dir() and any(assets_dir.iterdir())
-            projects.append({
-                "name": item.name,
-                "path": str(item),
-                "modified": stat.st_mtime,
-                "file_count": file_count,
-                "has_memory": has_memory,
-                "has_chat": has_chat,
-                "has_assets": has_assets,
-            })
+            items = sorted(directory.iterdir(), key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
         except OSError:
-            continue
+            return
+        for item in items:
+            if not item.is_dir():
+                continue
+            if (item / "project.godot").exists():
+                try:
+                    stat = item.stat()
+                    file_count = sum(
+                        1 for f in item.rglob("*")
+                        if f.is_file() and f.suffix in PROJECT_SOURCE_EXTENSIONS
+                    )
+                    has_memory = (item / "memory.md").exists()
+                    has_chat = (item / "chat_history.json").exists()
+                    assets_dir = item / "assets"
+                    has_assets = assets_dir.is_dir() and any(assets_dir.iterdir())
+                    projects.append({
+                        "name": item.name,
+                        "path": str(item),
+                        "modified": stat.st_mtime,
+                        "file_count": file_count,
+                        "has_memory": has_memory,
+                        "has_chat": has_chat,
+                        "has_assets": has_assets,
+                    })
+                except OSError:
+                    continue
+            elif is_local and depth < 2:
+                # For local mode, recurse into subdirs (session dirs) to find projects
+                _collect_projects(item, depth + 1)
 
-    return {"projects": projects}
+    _collect_projects(base)
+
+    # Deduplicate by path and sort by modified time
+    seen = set()
+    unique_projects = []
+    for p in sorted(projects, key=lambda x: x["modified"], reverse=True):
+        if p["path"] not in seen:
+            seen.add(p["path"])
+            unique_projects.append(p)
+
+    return {"projects": unique_projects}
 
 
 @app.delete("/api/projects")
@@ -1219,7 +1268,7 @@ async def delete_project(request: Request):
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Safety: only allow deleting inside the session's output dir
-    if not sess.owns_project(project_dir):
+    if not sess.owns_project(project_dir, local_mode=_is_local_request(request)):
         raise HTTPException(status_code=403, detail="Can only delete projects within your own session")
 
     shutil.rmtree(path)
@@ -1298,11 +1347,17 @@ async def clear_project_chat(request: Request):
 
 @app.post("/api/projects/create")
 async def create_project(request: Request):
-    """Create a new empty project directory with project.godot (per-session)."""
+    """Create a new empty project directory with project.godot."""
     sess = _get_session(request)
     body = await request.json()
     name = body.get("name", "MyGame")
-    output_dir = body.get("output_dir") or str(sess.output_dir)
+    # Local mode: default to global output dir (no session subdirectory)
+    if body.get("output_dir"):
+        output_dir = body["output_dir"]
+    elif _is_local_request(request):
+        output_dir = str(DEFAULT_OUTPUT_DIR)
+    else:
+        output_dir = str(sess.output_dir)
     
     # Sanitize name
     safe_name = "".join(c for c in name if c.isalnum() or c in " _-").strip() or "MyGame"

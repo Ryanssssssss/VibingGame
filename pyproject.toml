@@ -113,6 +113,7 @@ dependencies = [
     "requests>=2.31.0",
     "pydantic>=2.0.0",
     "python-multipart>=0.0.9",
+    "pygltflib>=1.16.0",
 ]
 
 [dependency-groups]

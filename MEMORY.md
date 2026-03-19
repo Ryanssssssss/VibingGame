@@ -57,7 +57,7 @@ vibe_tools/
 ├── intent_parser.py     # 意图解析器
 ├── godot_runner.py      # Godot 编辑器集成（启动/运行/验证）
 ├── llm_transfer.py      # OpenAI 兼容 LLM API（支持所有模型 + 工具调用）
-├── llm_provider.py      # Agent 游戏生成器（统一对话+工具循环）
+├── agent.py             # Agent 游戏生成器（统一对话+工具循环）
 ├── web_server.py        # FastAPI Web 服务器
 ├── static/index.html    # Web UI（项目列表 → 项目工作区：聊天+文件+素材+预览）
 ├── templates/           # 5 个游戏模板（blank/platformer_2d/topdown_2d/fps_3d/tps_3d）
@@ -127,6 +127,54 @@ vibe_tools/
 - **update_memory**: 更新项目记忆（memory.md），跨对话持久化
 
 循环: list_assets → generate_project → validate → (read+patch/write fix) → validate → run_project → update_memory → 对话回复
+
+### 本地模式 (local_mode)
+
+`web_server.py` 支持本地模式，通过 `_is_local_request(request)` 检测。本地请求（127.0.0.1/localhost）绕过 session 隔离：
+
+- **`owns_project()`**：本地模式只检查项目在 `DEFAULT_OUTPUT_DIR` 下，不要求属于特定 session
+- **`list_projects`**：本地模式递归扫描 `DEFAULT_OUTPUT_DIR`（最深2层），用 `_collect_projects()` 查找所有 `project.godot`
+- **`generate` / `generate_stream`**：本地模式使用 `DEFAULT_OUTPUT_DIR` 作为 base_dir
+- **`create_project` / `chat`**：本地模式默认输出到 `DEFAULT_OUTPUT_DIR`
+- **`download_export` / `play_game_files`**：先找 session 目录，fallback 到 `DEFAULT_OUTPUT_DIR`
+
+### project.godot 输入格式修复
+
+`agent.py` 中 `_tool_edit_project_settings` 修复了 input action 的序列化问题：
+
+- **`_format_input_action()`**：将 LLM 返回的 Python dict 转为 Godot `Object(InputEventKey,...)` 格式，支持 Key/JoypadButton/JoypadMotion/MouseButton 四种事件
+- **`_format_godot_value()`**：递归转换 Python 值为 Godot 配置格式（bool→true/false, None→null, dict/list 递归处理）
+- 当 section=="input" 且 value 是 dict 时自动调用格式化，避免写入 Python repr 字符串
+
+### 3D 模型 / GLB 经验总结
+
+**已解决的问题及防范机制：**
+
+1. **GLB 资源未导入**：上传 .glb 后 Godot 需 `--headless --import` 生成 `.godot/imported/` 缓存
+   - `godot_runner.py`: `import_resources()` 方法，`run_project()` 启动前自动调用
+   - `agent.py`: `_tool_run_project()` 也在运行前执行 `--import`
+
+2. **Instance 节点子节点冲突**：GLB instance 节点自带 AnimationPlayer 等子树，在 .tscn 中给 instance 节点加子节点会被忽略
+   - `_validate_instance_paths()`: 检测 instance+children 冲突并发出警告
+   - `scene_generator.py`: instance 节点的 children 被跳过并 log warning
+   - `3d_models.md` 规则 7/8: 禁止在 instance 节点下加子节点
+   - SYSTEM_PROMPT: 新增 3D MODELS / GLB 专节说明正确/错误结构
+
+3. **LLM 编造动画名**：LLM 常凭空编造 "IDLE NORMAL"、"Walk" 等不存在的动画名
+   - `3d_models.md`: 强调 NEVER guess，提供 runtime 发现动画的安全模式
+   - `_analyze_3d_model()`: 从 glTF 提取真实动画名列表
+   - `_format_3d_model_info()`: 在 list_assets 结果中展示真实动画名
+
+4. **第三人称控制错误**：
+   - 移动方向必须基于 **相机方向**（`camera_pivot.global_transform.basis`），不能基于玩家朝向
+   - 只旋转 **Model 子节点** 的 `rotation.y`，不能旋转整个 CharacterBody3D（否则相机也跟着转）
+   - GLB 模型默认可能面向 +Z（朝向相机），需要 Model 节点旋转 180°
+   - `tps_3d.py` 模板已更新为正确模式
+   - `3d_models.md` 新增完整第三人称角色模板（场景结构 + 脚本）
+
+5. **动态 Prompt 注入增强**：
+   - `_get_dynamic_prompts()`: write_file/patch_file 内容含 .glb/.gltf/AnimationPlayer 时注入 3d_models 指南
+   - 确保 LLM 在写入 3D 相关文件时始终能看到正确规则
 
 ### UI 架构
 

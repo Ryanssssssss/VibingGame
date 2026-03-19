@@ -84,6 +84,7 @@ class NodeDesc:
     type: str  # Godot class name, e.g. "CharacterBody2D"
     properties: dict[str, Any] = field(default_factory=dict)
     script: str | None = None  # res:// path to attached script
+    instance: str | None = None  # res:// path to a PackedScene (.glb/.tscn) to instance
     groups: list[str] = field(default_factory=list)
     children: list[NodeDesc] = field(default_factory=list)
 
