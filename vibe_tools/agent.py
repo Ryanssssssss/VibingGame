@@ -3644,7 +3644,6 @@ class GameGenerator:
     MAX_ITERATIONS_CHAT = AgentSession.MAX_ITERATIONS_CHAT
 
     # The agent model for code generation. Set via AGENT_MODEL env var.
-
     AGENT_MODEL = os.getenv("AGENT_MODEL", "claude-sonnet-4-20250514")
 
     def __init__(

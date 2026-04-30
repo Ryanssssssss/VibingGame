@@ -395,3 +395,23 @@ $RECYCLE.BIN/
 *.msp
 *.lnk
 *.generated.props
+
+##############################
+### Sensitive files / data ###
+##############################
+
+# Environment variable files
+.env
+.env.*
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.cer
+!tests/data/crypto/in.key
+
+# VibeTool user data (conversations, caches)
+vibe_tools/conversations/
+vibe_tools/api_cache/*.json
+!vibe_tools/api_cache/.gitkeep
