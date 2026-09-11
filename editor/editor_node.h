@@ -787,6 +787,8 @@ public:
 	static bool immediate_confirmation_dialog(const String &p_text, const String &p_ok_text = TTR("Ok"), const String &p_cancel_text = TTR("Cancel"), uint32_t p_wrap_width = 0);
 
 	static bool is_cmdline_mode();
+	void popup_project_export() { _menu_option_confirm(PROJECT_EXPORT, false); }
+	void popup_help_search() { _menu_option_confirm(HELP_SEARCH, false); }
 
 	static HashMap<String, Variant> get_initial_settings();
 

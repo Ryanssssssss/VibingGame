@@ -309,6 +309,7 @@ Generated\ Files/
 *.vspscc
 *.vssscc
 .builds
+.build/
 *.pidb
 *.svclog
 *.scc

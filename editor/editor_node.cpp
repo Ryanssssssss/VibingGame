@@ -112,6 +112,7 @@
 #include "editor/inspector/editor_resource_picker.h"
 #include "editor/inspector/editor_resource_preview.h"
 #include "editor/inspector/multi_node_edit.h"
+#include "editor/plugins/agent_editor_plugin.h"
 #include "editor/plugins/editor_plugin.h"
 #include "editor/plugins/editor_plugin_list.h"
 #include "editor/plugins/editor_resource_conversion_plugin.h"
@@ -9276,6 +9277,9 @@ EditorNode::EditorNode() {
 
 	if (!Engine::get_singleton()->is_recovery_mode_hint()) {
 		add_editor_plugin(get_game_view_plugin());
+		if (DisplayServer::get_singleton()->get_name() != "headless") {
+			add_editor_plugin(memnew(AgentEditorPlugin));
+		}
 	}
 
 	EditorAudioBuses *audio_bus_editor = EditorAudioBuses::register_editor();

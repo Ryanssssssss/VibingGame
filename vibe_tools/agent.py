@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -874,6 +875,18 @@ AGENT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "search_godot_api",
+            "description": "Search the bundled Godot 4.7 class reference. Use it to verify class names, methods, properties and signals instead of guessing APIs.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Class name or API keyword"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_project_settings",
             "description": "Modify project.godot settings. Use this to change input mappings, window size, physics layers, render settings, autoloads, etc. Provide key-value pairs in Godot config format.",
             "parameters": {
@@ -969,6 +982,14 @@ AGENT_TOOLS = [
                 "properties": {},
                 "required": []
             }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "export_windows",
+            "description": "Export the validated current project as a Windows x86_64 build. Fails with a clear message if matching export templates are unavailable.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
     {
@@ -1331,9 +1352,39 @@ class ChatHistoryStore:
     requests operating on different projects don't corrupt each other.
     """
 
-    def __init__(self):
+    def __init__(self, persistence_file: str | None = None, persistence_key: str | None = None):
         self._histories: dict[str, list[dict[str, Any]]] = {}
         self._lock = threading.Lock()
+        self._persistence_file = Path(persistence_file) if persistence_file else None
+        self._persistence_key = str(Path(persistence_key).resolve()) if persistence_key else None
+        self._legacy_wrapper = False
+        self._created = time.time()
+        if self._persistence_file and self._persistence_file.exists():
+            try:
+                loaded = json.loads(self._persistence_file.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    if isinstance(loaded.get("messages"), list):
+                        key = self._persistence_key or "__global__"
+                        self._histories[key] = loaded["messages"]
+                        self._legacy_wrapper = True
+                        self._created = loaded.get("created", self._created)
+                    else:
+                        self._histories = {str(k): v for k, v in loaded.items() if isinstance(v, list)}
+            except (OSError, ValueError):
+                logger.warning("Could not load persistent chat history", exc_info=True)
+
+    def _save_locked(self) -> None:
+        if not self._persistence_file:
+            return
+        self._persistence_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._persistence_file.with_suffix(".tmp")
+        if self._legacy_wrapper or self._persistence_file.name == "chat_history.json":
+            key = self._persistence_key or next(iter(self._histories), "__global__")
+            value: Any = {"messages": self._histories.get(key, []), "created": self._created, "updated": time.time()}
+        else:
+            value = self._histories
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self._persistence_file)
 
     def get(self, project_dir: str | None = None) -> list[dict[str, Any]]:
         """Get a COPY of chat history for a project (safe for concurrent reads)."""
@@ -1353,6 +1404,7 @@ class ChatHistoryStore:
             # Keep bounded (last 10 — recent context is enough, too much old history confuses the LLM)
             if len(self._histories[key]) > 10:
                 del self._histories[key][:len(self._histories[key]) - 10]
+            self._save_locked()
 
     def clear(self, project_dir: str | None = None) -> None:
         """Clear chat history for a specific project."""
@@ -1362,11 +1414,13 @@ class ChatHistoryStore:
             key = "__global__"
         with self._lock:
             self._histories.pop(key, None)
+            self._save_locked()
 
     def clear_all(self) -> None:
         """Clear all chat histories."""
         with self._lock:
             self._histories.clear()
+            self._save_locked()
 
 
 # ─── Agent Session (per-request isolated state) ───
@@ -1384,7 +1438,7 @@ class AgentSession:
     MAX_ITERATIONS_EXISTING = 20  # Existing project: read + fix + validate + memory
     MAX_ITERATIONS_CHAT = 3       # Pure chat: just respond
 
-    def __init__(self, llm: SimpleLLMProvider, chat_store: ChatHistoryStore, runner: Any = None):
+    def __init__(self, llm: SimpleLLMProvider, chat_store: ChatHistoryStore, runner: Any = None, cancel_event: Any = None, history_key: str | None = None):
         self.llm = llm
         self._chat_store = chat_store
         self._runner = runner
@@ -1402,6 +1456,13 @@ class AgentSession:
         self._injected_prompts: set[str] = set()
         # User-attached images for this session (base64 data URIs), accessible via analyze_image tool
         self._images: list[str] = []
+        self._cancel_event = cancel_event
+        self._history_key = history_key
+        self._api_kb = None
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            raise InterruptedError("任务已取消")
 
     def _get_runner(self):
         """Lazy-init GodotRunner."""
@@ -2303,6 +2364,31 @@ class AgentSession:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    def _tool_search_godot_api(self, args: dict) -> str:
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return json.dumps({"ok": False, "error": "Missing API query"})
+        try:
+            if self._api_kb is None:
+                from vibe_tools.api_parser import APIKnowledgeBase
+                cache = Path(__file__).resolve().parent / "api_cache" / "godot_api_4x.json"
+                if not cache.is_file():
+                    return json.dumps({"ok": False, "error": "Bundled Godot API cache is missing"})
+                self._api_kb = APIKnowledgeBase.load_from_cache(str(cache))
+            classes = []
+            for cls in self._api_kb.search(query, limit=8):
+                classes.append({
+                    "name": cls.name,
+                    "inherits": cls.inherits,
+                    "brief": cls.brief_description,
+                    "methods": [m.name for m in cls.methods[:40]],
+                    "properties": [p.name for p in cls.properties[:40]],
+                    "signals": [s.name for s in cls.signals[:30]],
+                })
+            return json.dumps({"ok": True, "classes": classes})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
     @staticmethod
     def _format_input_action(action_name: str, action_data: dict) -> str:
         """Format an input action dict into Godot project.godot format.
@@ -2489,6 +2575,19 @@ class AgentSession:
         else:
             self._add_step("error", f"Web export failed: {result.get('error', 'Unknown error')}")
 
+        return json.dumps(result)
+
+    def _tool_export_windows(self, args: dict) -> str:
+        """Tool: export_windows - export the project using matching templates."""
+        if not self._output_dir:
+            return json.dumps({"ok": False, "error": "No project directory set"})
+        runner = self._get_runner()
+        if not runner or not runner.is_available():
+            return json.dumps({"ok": False, "error": "Godot executable not available. Cannot export project."})
+        self._add_step("thinking", "Exporting project for Windows x86_64...")
+        result = runner.export_project_windows(self._output_dir)
+        self._add_step("success" if result.get("ok") else "error",
+                       "Windows export complete" if result.get("ok") else f"Windows export failed: {result.get('error', 'Unknown error')}")
         return json.dumps(result)
 
     def _tool_create_resource(self, args: dict) -> str:
@@ -2906,16 +3005,19 @@ class AgentSession:
         "delete_file": "_tool_delete_file",
         "rename_file": "_tool_rename_file",
         "search_files": "_tool_search_files",
+        "search_godot_api": "_tool_search_godot_api",
         "edit_project_settings": "_tool_edit_project_settings",
         "run_project": "_tool_run_project",
         "create_resource": "_tool_create_resource",
         "patch_file": "_tool_patch_file",
         "export_web": "_tool_export_web",
+        "export_windows": "_tool_export_windows",
         "analyze_image": "_tool_analyze_image",
     }
 
     def _execute_tool(self, tool_name: str, args: dict) -> str:
         """Execute a tool by name and return the result, with auto-injected guides."""
+        self._check_cancelled()
         method_name = self.TOOL_MAP.get(tool_name)
         if not method_name:
             return json.dumps({"ok": False, "error": f"Unknown tool: {tool_name}"})
@@ -3061,7 +3163,8 @@ class AgentSession:
 
         # Inject chat history for multi-turn context (project-isolated)
         # Keep budget small to avoid old conversations overshadowing the current request
-        chat_history = self._chat_store.get(output_dir)
+        history_key = self._history_key or output_dir
+        chat_history = self._chat_store.get(history_key)
         if chat_history:
             # Deduplicate: remove history messages that substantially overlap with memory
             if memory_content:
@@ -3138,6 +3241,7 @@ class AgentSession:
         consecutive_no_tools = 0
 
         while iteration < max_iter:
+            self._check_cancelled()
             iteration += 1
             self._add_step("thinking", f"Agent iteration {iteration}/{max_iter}...")
             last_iter_had_tools = False
@@ -3284,8 +3388,8 @@ class AgentSession:
                                 "iterations": iteration,
                                 "is_existing": is_existing,
                             }
-                            self._chat_store.append(output_dir, {"role": "user", "content": user_prompt})
-                            self._chat_store.append(output_dir, {"role": "assistant", "content": content_text})
+                            self._chat_store.append(history_key, {"role": "user", "content": user_prompt})
+                            self._chat_store.append(history_key, {"role": "assistant", "content": content_text})
                             if self._project_generated and self._output_dir:
                                 result["files"] = self._collect_project_files()
                                 proj_info = self._build_project_info()
@@ -3338,8 +3442,8 @@ class AgentSession:
                         except Exception as e:
                             # JSON extraction failed, treat as conversational
                             self._add_step("thinking", "Agent is responding to the user")
-                            self._chat_store.append(output_dir, {"role": "user", "content": user_prompt})
-                            self._chat_store.append(output_dir, {"role": "assistant", "content": content_text})
+                            self._chat_store.append(history_key, {"role": "user", "content": user_prompt})
+                            self._chat_store.append(history_key, {"role": "assistant", "content": content_text})
                             result_conv: dict[str, Any] = {
                                 "ok": True,
                                 "reply": content_text,
@@ -3366,6 +3470,8 @@ class AgentSession:
                     if consecutive_no_tools >= 2:
                         break
 
+            except InterruptedError:
+                raise
             except Exception as e:
                 self._add_step("error", f"Agent error: {e}")
                 logger.error(f"Agent loop error: {e}", exc_info=True)
@@ -3389,15 +3495,19 @@ class AgentSession:
         MAX_FIX_ROUNDS = 15  # Safety cap for post-loop fix attempts
 
         if self._output_dir and self._has_file_changes and not final_validation_ok:
+            self._check_cancelled()
             self._add_step("thinking", "Post-loop: files were modified but validation hasn't passed. Starting mandatory validate→fix loop.")
 
             for fix_round in range(1, MAX_FIX_ROUNDS + 1):
+                self._check_cancelled()
                 # ── Step 1: ALWAYS validate first ──
                 self._add_step("thinking", f"Post-loop round {fix_round}/{MAX_FIX_ROUNDS}: running validation...")
                 try:
                     val_result = self._tool_validate_project({})
                     self._has_validated = True
                     val_data = json.loads(val_result)
+                except InterruptedError:
+                    raise
                 except Exception as e:
                     self._add_step("error", f"Post-loop validation error: {e}")
                     logger.error(f"Post-loop validation error: {e}", exc_info=True)
@@ -3432,12 +3542,15 @@ class AgentSession:
                 fix_tools = [t for t in AGENT_TOOLS if t["function"]["name"] not in ("generate_project", "validate_project")]
 
                 while fix_iter < 8:
+                    self._check_cancelled()
                     fix_iter += 1
                     try:
                         fix_messages = self._trim_messages(fix_messages)
                         response = self.llm.invoke_with_tools(
                             fix_messages, tools=fix_tools, temperature=0.3, max_tokens=16384,
                         )
+                    except InterruptedError:
+                        raise
                     except Exception as e:
                         self._add_step("error", f"Post-loop LLM error: {e}")
                         logger.error(f"Post-loop LLM error: {e}", exc_info=True)
@@ -3544,14 +3657,14 @@ class AgentSession:
 
         # Save to project-isolated chat history
         # Only store the conversational reply — NOT tool action logs (they pollute future context)
-        self._chat_store.append(output_dir, {"role": "user", "content": user_prompt})
+        self._chat_store.append(history_key, {"role": "user", "content": user_prompt})
         if agent_reply:
-            self._chat_store.append(output_dir, {"role": "assistant", "content": agent_reply})
+            self._chat_store.append(history_key, {"role": "assistant", "content": agent_reply})
         else:
             # If no reply was generated, store a brief summary so history isn't empty
             tool_summary = self._build_tool_summary()
             if tool_summary:
-                self._chat_store.append(output_dir, {"role": "assistant", "content": f"[Made changes: {tool_summary[:200]}]"})
+                self._chat_store.append(history_key, {"role": "assistant", "content": f"[Made changes: {tool_summary[:200]}]"})
 
         # Build result
         final_result: dict[str, Any] = {
@@ -3650,17 +3763,25 @@ class GameGenerator:
         self,
         api_key: str | None = None,
         base_url: str | None = None,
+        model: str | None = None,
+        history_file: str | None = None,
+        runner: Any = None,
+        cancel_event: Any = None,
+        history_key: str | None = None,
     ):
         self.llm = SimpleLLMProvider(
-            model=self.AGENT_MODEL,
+            model=model or self.AGENT_MODEL,
             api_key=api_key,
             base_url=base_url,
         )
-        self._chat_store = ChatHistoryStore()
+        self._chat_store = ChatHistoryStore(history_file, persistence_key=history_key)
+        self._runner = runner
+        self._cancel_event = cancel_event
+        self._history_key = history_key
 
     def _create_session(self) -> AgentSession:
         """Create a new isolated AgentSession for a single request."""
-        return AgentSession(llm=self.llm, chat_store=self._chat_store)
+        return AgentSession(llm=self.llm, chat_store=self._chat_store, runner=self._runner, cancel_event=self._cancel_event, history_key=self._history_key)
 
     def agent_generate(
         self,

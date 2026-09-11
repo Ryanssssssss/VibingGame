@@ -77,6 +77,32 @@ class GodotRunner:
         """Check if the Godot executable exists."""
         return self._exe.exists()
 
+    def _engine_version_family(self) -> str | None:
+        """Return the running editor's major.minor family (for template checks)."""
+        try:
+            result = subprocess.run(
+                [str(self._exe), "--version"], capture_output=True, text=True,
+                timeout=10, creationflags=_CREATE_NO_WINDOW,
+            )
+            match = re.search(r"(\d+\.\d+)", result.stdout or result.stderr)
+            return match.group(1) if match else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _compatible_template(self, found: list[tuple[str, str]], platform_name: str, install_hint: str) -> dict:
+        family = self._engine_version_family()
+        compatible = [(version, path) for version, path in found if family and version.startswith(family + ".")]
+        if compatible:
+            choice = sorted(compatible, reverse=True)[0]
+            return {"installed": True, "path": choice[1], "version": choice[0], "hint": None}
+        if found:
+            versions = ", ".join(sorted(version for version, _ in found))
+            return {
+                "installed": False, "path": "", "version": None,
+                "hint": f"{platform_name} export templates are incompatible with editor {family or 'unknown'}. Installed: {versions}. {install_hint}",
+            }
+        return {"installed": False, "path": "", "version": None, "hint": install_hint}
+
     # ─── Launch helpers ───
 
     def open_editor(self, project_dir: str) -> subprocess.Popen | None:
@@ -372,64 +398,13 @@ class GodotRunner:
                         if (version_dir / wf).exists():
                             found.append((version_dir.name, str(version_dir)))
                             break
-        if found:
-            # Prefer stable versions (e.g. "4.6.1.stable") over dev
-            stable = [(v, p) for v, p in found if "stable" in v]
-            choice = stable[0] if stable else found[0]
-            return {
-                "installed": True,
-                "path": choice[1],
-                "version": choice[0],
-                "hint": None,
-            }
-        return {
-            "installed": False,
-            "path": str(tpl_dir),
-            "version": None,
-            "hint": (
+        return self._compatible_template(found, "Web", (
                 "Web export templates not found. To install:\n"
                 "1. Open Godot Editor → Editor → Manage Export Templates → Download\n"
                 "   OR\n"
                 "2. Download from https://godotengine.org/download and extract to:\n"
                 f"   {tpl_dir}/<version>/"
-            ),
-        }
-
-    def _find_stable_exe_for_export(self) -> Path | None:
-        """Find a stable Godot exe matching the installed export template version.
-
-        When the main exe is a dev build (e.g. 4.7.dev) but templates are from
-        a stable release (e.g. 4.6.1.stable), the wasm and pck are incompatible.
-        We look for a matching stable binary in bin/ to use for export only.
-        """
-        tpl_status = self.get_web_template_status()
-        if not tpl_status["installed"] or not tpl_status.get("version"):
-            return None
-
-        tpl_version = tpl_status["version"]  # e.g. "4.6.1.stable"
-
-        # If main exe version matches templates, no need for a separate binary
-        # Check by running --version, but simpler: if "stable" is in tpl_version
-        # and our exe path contains "dev" or version.py says dev, use stable exe.
-        engine_root = Path(__file__).resolve().parent.parent
-        stable_candidates = [
-            engine_root / "bin" / f"godot-{tpl_version}.exe",
-            engine_root / "bin" / f"godot-{tpl_version.replace('.stable', '')}-stable.exe",
-        ]
-        # Also try generic stable patterns
-        version_short = tpl_version.replace(".stable", "")  # "4.6.1"
-        stable_candidates.extend([
-            engine_root / "bin" / f"godot-{version_short}-stable.exe",
-            engine_root / "bin" / f"Godot_v{tpl_version}_win64.exe",
-            engine_root / "bin" / f"Godot_v{version_short}-stable_win64.exe",
-        ])
-
-        for candidate in stable_candidates:
-            if candidate.exists():
-                logger.info("Using stable Godot for web export: %s", candidate)
-                return candidate
-
-        return None
+            ))
 
     @staticmethod
     def _write_export_presets(project_dir: str) -> Path:
@@ -475,8 +450,8 @@ class GodotRunner:
     def export_project_web(self, project_dir: str, output_dir: str | None = None) -> dict:
         """Export a Godot project as HTML5/Web.
 
-        Uses a stable Godot binary matching the export template version when
-        available, to avoid version mismatches between dev builds and templates.
+        Uses the editor executable that owns the backend after confirming that
+        a matching export-template version is installed.
 
         Args:
             project_dir: Path to the project root (containing project.godot)
@@ -496,8 +471,9 @@ class GodotRunner:
         if not tpl_status["installed"]:
             return {"ok": False, "error": tpl_status["hint"]}
 
-        # Prefer a stable exe matching the template version for export
-        export_exe = self._find_stable_exe_for_export() or self._exe
+        # Always export through the editor that owns this backend. Template
+        # compatibility was checked above; never switch engines silently.
+        export_exe = self._exe
 
         if output_dir:
             export_dir = Path(output_dir).resolve()
@@ -602,27 +578,13 @@ class GodotRunner:
                         if (version_dir / wf).exists():
                             found.append((version_dir.name, str(version_dir)))
                             break
-        if found:
-            stable = [(v, p) for v, p in found if "stable" in v]
-            choice = stable[0] if stable else found[0]
-            return {
-                "installed": True,
-                "path": choice[1],
-                "version": choice[0],
-                "hint": None,
-            }
-        return {
-            "installed": False,
-            "path": str(tpl_dir),
-            "version": None,
-            "hint": (
+        return self._compatible_template(found, "Windows", (
                 "Windows export templates not found. To install:\n"
                 "1. Open Godot Editor → Editor → Manage Export Templates → Download\n"
                 "   OR\n"
                 "2. Download from https://godotengine.org/download and extract to:\n"
                 f"   {tpl_dir}/<version>/"
-            ),
-        }
+            ))
 
     @staticmethod
     def _write_windows_export_presets(project_dir: str) -> Path:
@@ -692,7 +654,7 @@ class GodotRunner:
         if not tpl_status["installed"]:
             return {"ok": False, "error": tpl_status["hint"]}
 
-        export_exe = self._find_stable_exe_for_export() or self._exe
+        export_exe = self._exe
 
         if output_dir:
             export_dir = Path(output_dir).resolve()

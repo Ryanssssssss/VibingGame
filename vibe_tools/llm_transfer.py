@@ -122,14 +122,15 @@ class SimpleLLMProvider:
         api_key: str | None = None,
         base_url: str | None = None,
         max_retries: int = _MAX_RETRIES,
+        request_timeout: float = 180.0,
         **kwargs: Any,
     ) -> None:
         self.model = model
         self.max_retries = max_retries
         self.logger = logger
-        self.client = self._init_client(base_url, api_key)
+        self.client = self._init_client(base_url, api_key, request_timeout)
 
-    def _init_client(self, base_url: str | None, api_key: str | None) -> OpenAI:
+    def _init_client(self, base_url: str | None, api_key: str | None, request_timeout: float) -> OpenAI:
         """Initialise the OpenAI-compatible client."""
         effective_base_url = base_url or os.getenv("LLM_BASE_URL")
         effective_api_key = api_key or os.getenv("LLM_API_KEY")
@@ -153,7 +154,7 @@ class SimpleLLMProvider:
 
         self.logger.info("Initializing OpenAI-compatible client with base URL: %s", effective_base_url or "(default)")
 
-        client = OpenAI(api_key=effective_api_key, base_url=effective_base_url)
+        client = OpenAI(api_key=effective_api_key, base_url=effective_base_url, timeout=request_timeout)
         self.logger.info("OpenAI-compatible client initialized successfully.")
         return client
 
