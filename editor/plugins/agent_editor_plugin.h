@@ -10,14 +10,17 @@
 #include "scene/gui/box_container.h"
 
 class Button;
+class AcceptDialog;
 class EditorFileDialog;
 class HTTPRequest;
 class Label;
 class LineEdit;
+class OptionButton;
 class RichTextLabel;
 class TabContainer;
 class TextEdit;
 class Tree;
+class TextureRect;
 
 class AgentWorkspace : public VBoxContainer {
 	GDCLASS(AgentWorkspace, VBoxContainer);
@@ -44,6 +47,7 @@ class AgentWorkspace : public VBoxContainer {
 	};
 
 	HTTPRequest *http = nullptr;
+	HTTPRequest *editor_state_http = nullptr;
 	Ref<HTTPClient> stream_client;
 	PackedByteArray stream_bytes;
 	String stream_path;
@@ -61,12 +65,22 @@ class AgentWorkspace : public VBoxContainer {
 	LineEdit *base_url = nullptr;
 	LineEdit *model = nullptr;
 	LineEdit *vision_model = nullptr;
+	OptionButton *response_language = nullptr;
+	AcceptDialog *settings_dialog = nullptr;
 	Button *send_button = nullptr;
 	Button *cancel_button = nullptr;
 	Button *retry_button = nullptr;
 	Tree *test_tree = nullptr;
 	TextEdit *test_plan_editor = nullptr;
 	RichTextLabel *test_output = nullptr;
+	RichTextLabel *test_details = nullptr;
+	BoxContainer *test_evidence = nullptr;
+	TextureRect *test_screenshot = nullptr;
+	Label *test_phase = nullptr;
+	Button *test_stop = nullptr;
+	Vector<Button *> test_edit_buttons;
+	Dictionary test_plan;
+	double test_refresh_elapsed = 0.0;
 	EditorFileDialog *attachment_dialog = nullptr;
 	EditorFileDialog *asset_dialog = nullptr;
 
@@ -86,6 +100,8 @@ class AgentWorkspace : public VBoxContainer {
 
 	static String _u8(const char *p_text);
 	void _set_status(const String &p_text, bool p_error = false);
+	void _append_inline_markdown(const String &p_text, int p_depth = 0);
+	void _open_markdown_link(const Variant &p_meta);
 	void _append_markdown(const String &p_text);
 	void _append_message(const String &p_author, const String &p_text);
 	PackedStringArray _get_dirty_files() const;
@@ -110,12 +126,8 @@ class AgentWorkspace : public VBoxContainer {
 	void _cancel();
 	void _clear_conversation();
 	void _save_settings();
+	void _show_settings();
 	void _quick_prompt(const String &p_text);
-	void _run_project();
-	void _stop_project();
-	void _open_game_workspace();
-	void _open_export();
-	void _search_help();
 	void _rollback_last_task();
 
 	void _choose_attachments();
@@ -131,6 +143,10 @@ class AgentWorkspace : public VBoxContainer {
 	void _run_all_tests();
 	void _open_selected_artifact();
 	void _render_harness_plan(const Dictionary &p_plan);
+	void _show_test_details();
+	void _regenerate_tests();
+	void _toggle_test_json(bool p_visible);
+	void _set_test_busy(bool p_busy);
 
 protected:
 	void _notification(int p_what);

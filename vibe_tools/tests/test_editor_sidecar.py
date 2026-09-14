@@ -6,12 +6,14 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from vibe_tools.editor_harness import AcceptanceHarness
 from vibe_tools.editor_sidecar import Runtime, app
 from vibe_tools.editor_workspace import Workspace
+from vibe_tools.tests.test_editor_behavior import move_case
 
 
 class EditorSidecarTest(unittest.TestCase):
@@ -27,8 +29,14 @@ class EditorSidecarTest(unittest.TestCase):
         Runtime.runs = {}
         self.client = TestClient(app)
         self.headers = {"Authorization": "Bearer sidecar-token"}
+        self.credentials = patch("vibe_tools.editor_sidecar.credential", return_value="")
+        self.credentials.start()
+        self.preflight = patch.object(AcceptanceHarness, "_preflight", return_value={"status": "blocked", "summary": "Godot unavailable in unit test"})
+        self.preflight.start()
 
     def tearDown(self):
+        self.preflight.stop()
+        self.credentials.stop()
         self.temp.cleanup()
 
     def test_project_bound_health_and_authentication(self):
@@ -65,10 +73,11 @@ class EditorSidecarTest(unittest.TestCase):
 
     def test_harness_marks_results_stale_after_project_change(self):
         harness = AcceptanceHarness(self.project, "")
-        plan = harness.load_plan()
+        plan = harness.save_plan({"cases": [move_case()]})
         plan["cases"][0]["status"] = "passed"
+        plan["cases"][0]["verified_fingerprint"] = "old"
         plan["verified_fingerprint"] = "old"
-        harness.save_plan(plan)
+        harness._persist(plan)
         loaded = harness.load_plan()
         self.assertEqual(loaded["cases"][0]["status"], "stale")
 
@@ -102,19 +111,20 @@ class EditorSidecarTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual((self.project / "project.godot").read_text(encoding="utf-8"), "user\n")
 
-    def test_visual_case_fails_cleanly_and_artifact_escape_is_rejected(self):
+    def test_visual_case_blocks_cleanly_and_artifact_escape_is_rejected(self):
         harness = AcceptanceHarness(self.project, "")
-        plan = harness.load_plan()
-        plan["cases"][0]["requires_visual"] = True
-        harness.save_plan(plan)
+        harness.save_plan({"cases": [{"title": "画面可见", "requires_visual": True,
+                                     "steps": [{"op": "visual", "criteria": "画面可见"}]}]})
         events = []
         summary = harness.run([], lambda name, payload: events.append((name, payload)), threading.Event())
-        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["blocked"], 1)
+        self.assertEqual(summary["failed"], 0)
         self.assertTrue(any(name == "harness_result" for name, _ in events))
         with self.assertRaises((ValueError, FileNotFoundError)):
             harness.artifact("../../project.godot")
 
     def test_harness_stream_uses_versioned_sse_events(self):
+        AcceptanceHarness(self.project, "").save_plan({"cases": [move_case()]})
         with self.client.stream(
             "POST", "/v1/harness/run-stream", headers=self.headers,
             json={"case_ids": []},
