@@ -20,6 +20,8 @@ Agent 工作区中的对话和 Tests 使用完整宽度，设置不再占用常�
 
 ## 开始使用
 
+GitHub 仓库和“Download ZIP”提供的是源码，不包含编译好的 `.exe`。如果没有完整 Windows 发布包，请先按下方 [Windows 构建](#windows-构建) 编译并打包，再执行以下步骤。
+
 1. 打开完整 Windows 发布包中的 `VibeGodot.exe`，通过项目管理器新建或打开项目。请保留同目录的 `vibe_agent` 等依赖文件，不要只复制编辑器 EXE。
 2. 进入顶部 **Agent** 工作区，点击 **设置**，填写兼容模型服务的接口地址、主模型、视觉模型和 API Key。
 3. 选择回答语言并点击 **保存设置**。默认使用简体中文，已有历史不会自动翻译。视觉验收需要支持图片输入的模型与接口。
@@ -64,16 +66,79 @@ Tests 支持单项运行、全部运行、重新生成、停止及高级 JSON �
 
 ## Windows 构建
 
-需要可构建本仓库 Godot 源码的 Windows C++ 工具链、Windows SDK、Python 和 SCons。后台打包脚本使用 `.build/pythonlibs` 中的 Python 依赖，包括 PyInstaller、FastAPI、Uvicorn、OpenAI SDK、Pydantic、Pillow、Requests 和 pygltflib。先准备依赖，再在仓库根目录执行：
+以下步骤面向 Windows x64，所有命令在 **PowerShell** 中执行。编译需要联网下载源码和 Python 依赖，运行 Agent 还需自行配置模型服务。
+
+### 1. 安装工具
+
+- Git。
+- Visual Studio 2022 或 Build Tools 2022，选择“使用 C++ 的桌面开发”，包含 MSVC x64/x86 编译工具和 Windows SDK。
+- 64 位 Python 3.12，安装时启用 pip 并将 Python 加入 PATH。
+
+安装后打开新的 PowerShell，确认 `git --version` 和 `python --version` 可用。若 SCons 找不到 MSVC，请从 Visual Studio 的 **Developer PowerShell** 重新执行构建命令。
+
+### 2. 获取源码
 
 ```powershell
-$env:PYTHONPATH="$PWD\.build\pythonlibs;$PWD"
-python -m SCons platform=windows target=editor production=yes debug_symbols=no d3d12=no -j4
-.\misc\vibe_agent\build_sidecar.ps1 -PythonExe (Get-Command python).Source
-.\misc\vibe_agent\package_windows.ps1 -PythonExe (Get-Command python).Source -SkipBuild -SkipSidecarBuild
+git clone --branch codex/agent-tests-and-settings https://github.com/Ryanssssssss/VibingGame.git
+Set-Location VibingGame
 ```
 
-默认输出目录为 `.build/VibeGodot-Windows-x86_64`。打包脚本会替换指定的输出目录，请勿将游戏项目放在该目录内。构建产物不随源码提交；游戏导出需要与定制编辑器版本匹配的导出模板。
+该分支包含本文介绍的 Agent 和 Tests 功能。已有本地仓库时使用自己的工作目录，不必重复克隆。以下命令均在含有 `SConstruct` 的仓库根目录执行。
+
+### 3. 安装构建和后台依赖
+
+```powershell
+python -m pip install --target .build/pythonlibs scons pyinstaller fastapi uvicorn openai "pydantic>=2,<3" pillow requests pygltflib python-multipart
+if ($LASTEXITCODE -ne 0) { throw "Python dependency installation failed" }
+$env:PYTHONPATH="$PWD\.build\pythonlibs;$PWD"
+$pythonExe = (Get-Command python -CommandType Application).Source
+```
+
+依赖安装到本项目 `.build/pythonlibs`；后台打包脚本会从这个位置查找 PyInstaller。后续步骤使用同一个 Python。重新打开终端后，需要重新设置 `PYTHONPATH` 和 `$pythonExe`。
+
+### 4. 编译编辑器
+
+```powershell
+& $pythonExe -m SCons platform=windows target=editor arch=x86_64 production=yes debug_symbols=no d3d12=no -j4
+if ($LASTEXITCODE -ne 0) { throw "Editor build failed" }
+```
+
+生成 `bin/godot.windows.editor.x86_64.exe`。`-j4` 表示并行编译 4 个任务；内存不足时可改为 `-j2`。首次编译耗时较长，需要为源码、对象文件和发布包预留磁盘空间。
+
+### 5. 打包 Agent 后台和完整发布包
+
+```powershell
+.\misc\vibe_agent\build_sidecar.ps1 -PythonExe $pythonExe
+if ($LASTEXITCODE -ne 0) { throw "Sidecar build failed" }
+.\misc\vibe_agent\package_windows.ps1 -PythonExe $pythonExe -SkipBuild -SkipSidecarBuild -Zip
+```
+
+`-SkipBuild` 和 `-SkipSidecarBuild` 只适用于前两步已经成功的情况。不要在编辑器或后台仍使用旧构建文件时覆盖打包目录；脚本会替换指定的输出目录，因此不要把游戏项目放入其中。
+
+默认输出：
+
+```text
+.build/
+├── VibeGodot-Windows-x86_64.zip
+└── VibeGodot-Windows-x86_64/
+    ├── VibeGodot.exe
+    ├── VibeGodot.console.exe
+    ├── vibe_agent/
+    │   └── godotvibe-agent/
+    │       ├── godotvibe-agent.exe
+    │       └── _internal/
+    ├── licenses/
+    └── 使用说明.md
+```
+
+解压完整 ZIP 后运行 `VibeGodot.exe`。分发时保留全部文件，不能只复制编辑器或 sidecar 的 EXE；目标电脑无需安装 Python。构建产物不会随源码提交，游戏导出需要与定制编辑器版本匹配的导出模板。
+
+### 常见构建问题
+
+- **找不到 SCons / PyInstaller**：确认依赖安装成功，并在当前 PowerShell 中设置了上述 `PYTHONPATH`。
+- **找不到 MSVC / Windows SDK**：检查 Visual Studio 的 C++ 工作负载和 SDK，使用 Developer PowerShell 重试。
+- **PowerShell 阻止脚本运行**：检查脚本来源后，按本机或组织的执行策略允许运行；不要修改系统安全策略来绕过组织限制。
+- **后台缺失或启动失败**：确认运行的是完整发布目录，检查游戏项目中的 `.godot/agent/sidecar.log`。
 
 ## 开发验证
 
